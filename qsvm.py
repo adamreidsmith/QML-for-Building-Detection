@@ -74,7 +74,15 @@ def retry(
 
 
 class QSVM:
-    '''Quantum support vector machine'''
+    '''
+    Quantum Support Vector Machine
+
+    References
+    ----------
+    [1] D. Willsch, M. Willsch, H. De Raedt, and K. Michielsen. "Support vector machines on the d-wave quantum 
+        annealer". Computer Physics Communications, 248:107006, 2020. 
+        https://www.sciencedirect.com/science/article/pii/S001046551930342X.
+    '''
 
     valid_kernels = {'linear', 'rbf', 'sigmoid', 'poly'}
     valid_samplers = {'simulate', 'steepest_descent', 'tabu', 'hybrid', 'qa'}
@@ -84,7 +92,7 @@ class QSVM:
 
     def __init__(
         self,
-        kernel: str = 'rbf',
+        kernel: str | Callable[[np.ndarray, np.ndarray], float] = 'rbf',
         B: int = 2,
         P: int = 0,
         K: int = 3,
@@ -101,8 +109,9 @@ class QSVM:
         '''
         Parameters
         ----------
-        kernel : str
-            Specifies the kernel type to be used in the algorithm. One of 'linear', 'rbf', 'poly', or 'sigmiod'.
+        kernel : str | Callable[[np.ndarray, np.ndarray], float]
+            Specifies the kernel type to be used in the algorithm. If a string, one of 'linear', 'rbf', 'poly',
+            or 'sigmiod'. If a Callable, the kernel elements K[i, j] will be computed as kernel(X[i], Y[j]).
             Default is 'rbf'.
         B : int
             Base to use in the binary encoding of the QSVM coefficients. See equation (10) in [1]. Default is 2.
@@ -134,11 +143,6 @@ class QSVM:
             Whether or not to normalize input data. Default is True.
         warn : bool
             Warn if samples lie on the decision boundary of the fitted classifier. Default is False.
-
-        References
-        ----------
-        [1] Willsch, Willsch, De Raedt, and Michielsen, 2020. "Support vector machines on the D-Wave quantum annealer".
-            https://www.sciencedirect.com/science/article/pii/S001046551930342X. DOI: 10.1016/j.cpc.2019.107006
         '''
 
         self.B = float(B)  # Base of the encoding
@@ -157,8 +161,8 @@ class QSVM:
         self.sampler = sampler
         self.num_reads = num_reads
 
-        if kernel not in self.valid_kernels:
-            raise ValueError(f'Invalid kernel \'{kernel}\'. Valid options are {self.valid_kernels}')
+        if kernel not in self.valid_kernels and not callable(kernel):
+            raise ValueError(f'Invalid kernel \'{kernel}\'. Valid options are {self.valid_kernels} or a callable')
         self.kernel = self._define_kernel(kernel, self.gamma, self.coef0, self.degree)
 
         self.normalize = normalize
@@ -178,13 +182,19 @@ class QSVM:
         self.bias: float
 
     def _define_kernel(
-        self, ker: str, gamma: Optional[float] = None, coef0: Optional[float] = None, degree: Optional[int] = None
+        self,
+        ker: str | Callable[[np.ndarray, np.ndarray], float],
+        gamma: Optional[float] = None,
+        coef0: Optional[float] = None,
+        degree: Optional[int] = None,
     ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
         '''
         Define the kernel function.
         '''
 
-        if ker == 'linear':
+        if callable(ker):
+            kernel = ker
+        elif ker == 'linear':
             kernel = linear_kernel
         elif ker == 'rbf':
             kernel = partial(rbf_kernel, gamma=gamma)
@@ -407,7 +417,10 @@ class QSVM:
 
         # kernel_vals = self.kernel(self.X, X)
         # return sum(self.alphas[n] * self.y[n] * kernel_vals[n, :] for n in range(self.N))
-        return (self.alphas * self.y) @ self.kernel(self.X, X)  # Same as above 2 lines, but faster
+
+        # Same as above 2 lines, but faster
+        computed_kernel = self._computed_kernel if (X == self.X).all() else self.kernel(self.X, X)
+        return (self.alphas * self.y) @ computed_kernel
 
     def _compute_bias(self, n_biases: int = 100) -> float:
         '''

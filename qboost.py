@@ -1,16 +1,24 @@
 import heapq
-from typing import Any, Optional
+from typing import Optional
 from collections.abc import Sequence, Callable
 from collections import defaultdict
 
 import numpy as np
 from dwave.samplers import SimulatedAnnealingSampler, SteepestDescentSampler
 
-# from dwave.system import LeapHybridSampler
-
 
 class QBoost:
-    '''A class to implement the QBoost algorithm'''
+    '''
+    A class to implement the QBoost algorithm
+
+    References
+    ----------
+    [1] Hartmut Neven, Vasil S. Denchev, Geordie Rose, and William G. Macready. Qboost: Large scale
+        classifier training withadiabatic quantum optimization. In Steven C. H. Hoi and Wray Buntine,
+        editors, Proceedings of the Asian Conference on Machine Learning, volume 25 of Proceedings of
+        Machine Learning Research, pages 333-348, Singapore Management University, Singapore,
+        04-06 Nov 2012. PMLR. https://proceedings.mlr.press/v25/neven12.html.
+    '''
 
     def __init__(
         self,
@@ -39,8 +47,6 @@ class QBoost:
             Number of reads for the quantum or classical annealer.
         '''
 
-        Q = len(weak_classifiers)
-        # self.classifiers = [WeakCLFNormalizer(clf, Q) for clf in weak_classifiers]
         self.classifiers = list(weak_classifiers)
 
         # Encoding vars
@@ -78,15 +84,18 @@ class QBoost:
             Training features of shape (n_samples, n_features)
         y_train : np.ndarray
             Training class labels of shape (n_samples,)
-        x_val : np.ndarray | None
+        x_val : np.ndarray | None, optional
             Validation features of shape (n_samples, n_features). If None, training data is used as validation data.
-        y_val : np.ndarray | None
+            Default is None.
+        y_val : np.ndarray | None, optional
             Validation class labels of shape (n_samples,). If None, training data is used as validation data.
+            Default is None.
 
         Returns
         -------
         self
         '''
+
         # Validate inputs and obtain classification results
         x_train, y_train = self._validate_inputs(x_train, y_train)
         n_train_samples = len(x_train)
@@ -333,20 +342,3 @@ class QBoost:
 
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
-
-
-if __name__ == '__main__':
-    np.random.seed(12131415)
-    rndx = np.random.randint(0, 2, 1000)
-    clf1 = lambda x: np.sign(x.sum(axis=1))
-    clf2 = lambda x: np.ones(x.shape[0])
-    clf3 = lambda x: -np.ones(x.shape[0])
-    clf4 = lambda x: 2 * rndx[: x.shape[0]] - 1
-
-    n_samples = 10
-    n_features = 4
-    X = np.random.rand(n_samples, n_features) - 0.5
-    Y = 2 * np.random.randint(0, 2, n_samples) - 1
-
-    qboost = QBoost([clf1, clf2, clf3, clf4], K=3, B=2, P=1, lbda=[0, 1, 0.1])
-    q1 = qboost.fit(X, Y, X, Y)

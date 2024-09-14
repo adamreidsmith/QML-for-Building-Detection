@@ -1,13 +1,19 @@
-from typing import Callable, Any
+from typing import Callable
 import numpy as np
 
 
 class AdaBoost:
     '''
     AdaBoost classifier using a set of weak classifiers.
+
+    References
+    ----------
+    [1] Yoav Freund and Robert E Schapire. "A decision-theoretic generalization of on-line
+        learning and an application to boosting". Journal of Computer and System Sciences,
+        55(1):119-139, 1997. https://www.sciencedirect.com/science/article/pii/S002200009791504X.
     '''
 
-    def __init__(self, weak_classifiers: list[Callable[[np.ndarray], np.ndarray]], n_estimators: int = 50):
+    def __init__(self, weak_classifiers: list[Callable[[np.ndarray], np.ndarray]], n_estimators: int = 50) -> None:
         '''
         Initialize the AdaBoost classifier.
 
@@ -24,7 +30,7 @@ class AdaBoost:
         self.alphas = []
         self.selected_classifiers = []
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(self, X: np.ndarray, y: np.ndarray) -> 'AdaBoost':
         '''
         Fit the AdaBoost classifier to the training data.
 
@@ -34,6 +40,10 @@ class AdaBoost:
             Training features of shape (n_samples, n_features)
         y : np.ndarray
             Target labels of shape (n_samples,)
+
+        Returns
+        -------
+        self
         '''
 
         n_samples = X.shape[0]
@@ -61,6 +71,8 @@ class AdaBoost:
             # Store the selected classifier and its weight
             self.alphas.append(alpha)
             self.selected_classifiers.append(best_clf)
+
+        return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         '''
