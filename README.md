@@ -88,7 +88,7 @@ Quantum machine learning techniques show promising results for building detectio
 
 [9] Michael J. Bremner, Richard Jozsa, and Dan J. Shepherd. Classical simulation of commuting quantum computations implies collapse of the polynomial hierarchy. _Proceedings of the Royal Society A: Mathematical, Physical and Engineering Sciences_, 467:459 – 472, 2010.
 
-[10] qml.iqpembedding. <https://docs.pennylane.ai/en/stable/code/api/ pennylane.IQPEmbedding.html>. Accessed Aug 15, 2024.
+[10] qml.iqpembedding. <https://docs.pennylane.ai/en/stable/code/api/pennylane.IQPEmbedding.html>. Accessed Aug 15, 2024.
 
 [11] K. Mitarai, M. Negoro, M. Kitagawa, and K. Fujii. Quantum circuit learning. _Phys. Rev. A_, 98:032309, Sep 2018.
 
