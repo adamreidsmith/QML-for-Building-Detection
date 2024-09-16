@@ -1,8 +1,3 @@
-# Quantum SVM and QBoost
-
-See [here](https://doi.org/10.1016/j.cpc.2019.107006) and [here](https://proceedings.mlr.press/v25/neven12.html).
-
-
 # Quantum Machine Learning for Building Detection in LiDAR Point Clouds
 
 This repository contains the code for experiments comparing classical and quantum machine learning algorithms for building detection in LiDAR point cloud data.
