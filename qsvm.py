@@ -79,8 +79,8 @@ class QSVM:
 
     References
     ----------
-    [1] D. Willsch, M. Willsch, H. De Raedt, and K. Michielsen. "Support vector machines on the d-wave quantum 
-        annealer". Computer Physics Communications, 248:107006, 2020. 
+    [1] D. Willsch, M. Willsch, H. De Raedt, and K. Michielsen. "Support vector machines on the d-wave quantum
+        annealer". Computer Physics Communications, 248:107006, 2020.
         https://www.sciencedirect.com/science/article/pii/S001046551930342X.
     '''
 
@@ -419,7 +419,9 @@ class QSVM:
         # return sum(self.alphas[n] * self.y[n] * kernel_vals[n, :] for n in range(self.N))
 
         # Same as above 2 lines, but faster
-        computed_kernel = self._computed_kernel if (X == self.X).all() else self.kernel(self.X, X)
+        computed_kernel = (
+            self._computed_kernel if X.shape == self.X.shape and (X == self.X).all() else self.kernel(self.X, X)
+        )
         return (self.alphas * self.y) @ computed_kernel
 
     def _compute_bias(self, n_biases: int = 100) -> float:

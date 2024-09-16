@@ -6,7 +6,7 @@ import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import PauliFeatureMap
-from qiskit_machine_learning.kernels import FidelityQuantumKernel
+from qiskit_machine_learning.kernels import FidelityStatevectorKernel
 
 
 class VectorizeKernel:
@@ -77,7 +77,7 @@ class Kernel:
 
         self.fm_name = fm_name
         self.feature_map = feature_map
-        self.kernel = FidelityQuantumKernel(feature_map=self.feature_map)
+        self.kernel = FidelityStatevectorKernel(feature_map=self.feature_map)
         self.preprocess_func = preprocess_func
 
     def __call__(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> np.ndarray:
@@ -98,7 +98,6 @@ class Kernel:
             The 2D kernel matrix.
         '''
 
-        print(f'Evaluating {self.fm_name} for x={x.shape}' + f', y={y.shape}' if y is not None else '')
         if self.preprocess_func is not None:
             x = self.preprocess_func(x)
         ret = self.kernel.evaluate(x_vec=x, y_vec=y)
@@ -136,7 +135,7 @@ def get_entanglement_pattern(num_qubits: int, entanglement: str, rep: int = 0) -
         The entanglement pattern.
     '''
 
-    match pattern:
+    match entanglement:
         case 'full':
             pattern = combinations(range(num_qubits), 2)
 

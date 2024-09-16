@@ -23,13 +23,9 @@ from adaboost import AdaBoost
 from quantum_kernels import (
     Kernel,
     pauli_feature_map,
-    # z_feature_map,
-    # zz_feature_map,
     iqp_feature_map,
-    # tensorial_feature_map,
     polynomial_feature_map,
     qaoa_inspired_feature_map,
-    # random_feature_map,
     data_reuploading_feature_map,
 )
 
@@ -38,42 +34,9 @@ from quantum_kernels import (
 load_dotenv()
 
 WORKING_DIR = Path(__file__).parent
-PROCESSES = 8
+PROCESSES = 1
 # SEED = int(sys.argv[1])
-SEED = 11990
-# SEED = 988002432
-# SEED = 9217129
-# SEED = 9584729
-'''
-Good seeds:
-10293847 0.96
-990053222 0.96
-9217129 0.94
-9584729 0.94
-82734659 0.95
-11990 0.94
-1233111498 0.93
-988002432 0.93
-11763846 0.93
-8389287 0.93
-1233232222 0.92
-92837465 0.92
-3650222 0.92
-6877644 0.92  FAILED
-7829838 0.92 FAILED
-9876434 0.92
-74839201 0.91
-112986551 0.91
-990901111 0.90
-28769643 0.90
-48495858 0.90
-78475463 0.90
-8575849 0.90
-3467569 0.90
-396693 0.89
-88474 0.89
-4467786 0.89
-'''
+SEED = 9217129
 
 IID = np.random.randint(1, 1_000_000)
 random.seed(SEED)
@@ -406,19 +369,26 @@ def main(verbose: bool = True, visualize: bool = False):
         valid_x=(valid_x - train_mean) / train_std,
         valid_y=valid_y,
         processes=PROCESSES,
-        save=True,
+        save=False,
     )
     if verbose:
         print(f'SVM params: {params | svm_kw_params}')
     svm = SVC(**params, **svm_kw_params)
+
+    # svm_kw_params = {'class_weight': 'balanced'}
+    # params = {
+    #     'C': 0.1,
+    #     'kernel': Kernel(feature_map=data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')),
+    # }
+    # svm = SVC(**params, **svm_kw_params)
     svm.fit((train_x - train_mean) / train_std, train_y)
 
     svm_acc = svm.score((valid_x - train_mean) / train_std, valid_y)
     print(f'SVM validation accuracy: {svm_acc:.2%}')
-    # svm_acc = svm.score(
-    #     (point_cloud[features].to_numpy() - train_mean) / train_std, point_cloud.classification.to_numpy()
-    # )
-    # print(f'SVM accuracy: {svm_acc:.2%}')
+    svm_acc = svm.score(
+        (point_cloud[features].to_numpy() - train_mean) / train_std, point_cloud.classification.to_numpy()
+    )
+    print(f'SVM accuracy: {svm_acc:.2%}')
     # svm_acc = svm.score(
     #     (full_point_cloud[features].to_numpy() - train_mean) / train_std, full_point_cloud.classification.to_numpy()
     # )
@@ -455,17 +425,27 @@ def main(verbose: bool = True, visualize: bool = False):
         valid_x=valid_x,
         valid_y=valid_y,
         processes=PROCESSES,
-        save=True,
+        save=False,
     )
     if verbose:
         print(f'QSVM params: {params | qsvm_kw_params}')
     qsvm = QSVM(**params, **qsvm_kw_params)
+
+    # qsvm_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
+    # params = {
+    #     'B': 2,
+    #     'P': 1,
+    #     'K': 3,
+    #     'zeta': 1.5,
+    #     'kernel': Kernel(feature_map=data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')),
+    # }
+    # qsvm = QSVM(**params, **qsvm_kw_params)
     qsvm.fit(train_x, train_y)
 
     qsvm_acc = qsvm.score(valid_x, valid_y)
     print(f'QSVM validation accuracy: {qsvm_acc:.2%}')
-    # qsvm_acc = qsvm.score(point_cloud[features].to_numpy(), point_cloud.classification.to_numpy())
-    # print(f'QSVM accuracy: {qsvm_acc:.2%}')
+    qsvm_acc = qsvm.score(point_cloud[features].to_numpy(), point_cloud.classification.to_numpy())
+    print(f'QSVM accuracy: {qsvm_acc:.2%}')
     # qsvm_acc = qsvm.score(full_point_cloud[features].to_numpy(), full_point_cloud.classification.to_numpy())
     # print(f'QSVM accuracy: {qsvm_acc:.2%}')
 
