@@ -83,3 +83,7 @@ Quantum machine learning techniques show promising results for building detectio
 - Adrian Perez-Salinas, Alba Cervera-Lierta, Elies Gil-Fuster, and Jose I. Latorre. Data re-uploading for a universal quantum classifier. _Quantum_, 4:226, February 2020.
 - City of Vancouver. Lidar 2022, 2022. Vancouver Open Data Portal.
 - Qiskit contributors. Qiskit: An open-source framework for quantum computing, 2023.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
