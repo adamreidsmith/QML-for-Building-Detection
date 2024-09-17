@@ -115,3 +115,13 @@ class AdaBoost:
 
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.__class__.__name__}(n_estimators={self.n_estimators})'
+
+    def __repr__(self):
+        repr_str = self.__str__()
+        clf_limit = 5
+        clf_str = f'[{", ".join(map(str, self.weak_classifiers[:clf_limit]))}{", ..." * (len(self.weak_classifiers) > clf_limit)}]'
+        repr_str = repr_str[:-2] + f', weak_classifiers={clf_str})'
+        return repr_str

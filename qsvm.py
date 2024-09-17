@@ -90,59 +90,80 @@ class QSVM:
     _dwave_sampler: Optional[DWaveSampler] = None
     _hybrid_sampler: Optional[LeapHybridSampler] = None
 
+    _arg_defaults = {
+        'kernel': 'rbf',
+        'B': 2,
+        'P': 0,
+        'K': 3,
+        'zeta': 1.0,
+        'gamma': 1.0,
+        'coef0': 0.0,
+        'degree': 3,
+        'sampler': 'steepest_descent',
+        'num_reads': 100,
+        'hybrid_time_limit': 3,
+        'normalize': True,
+        'warn': False,
+    }
+
     def __init__(
         self,
-        kernel: str | Callable[[np.ndarray, np.ndarray], float] = 'rbf',
-        B: int = 2,
-        P: int = 0,
-        K: int = 3,
-        zeta: float = 1.0,
-        gamma: float = 1.0,
-        coef0: float = 0.0,
-        degree: int = 3,
-        sampler: str = 'steepest_descent',
-        num_reads: int = 100,
-        hybrid_time_limit: float = 3,
-        normalize: bool = True,
-        warn: bool = False,
+        kernel: str | Callable[[np.ndarray, np.ndarray], float] = _arg_defaults['kernel'],
+        B: int = _arg_defaults['B'],
+        P: int = _arg_defaults['P'],
+        K: int = _arg_defaults['K'],
+        zeta: float = _arg_defaults['zeta'],
+        gamma: float = _arg_defaults['gamma'],
+        coef0: float = _arg_defaults['coef0'],
+        degree: int = _arg_defaults['degree'],
+        sampler: str = _arg_defaults['sampler'],
+        num_reads: int = _arg_defaults['num_reads'],
+        hybrid_time_limit: float = _arg_defaults['hybrid_time_limit'],
+        normalize: bool = _arg_defaults['normalize'],
+        warn: bool = _arg_defaults['warn'],
     ) -> None:
-        '''
+        f'''
         Parameters
         ----------
         kernel : str | Callable[[np.ndarray, np.ndarray], float]
             Specifies the kernel type to be used in the algorithm. If a string, one of 'linear', 'rbf', 'poly',
             or 'sigmiod'. If a Callable, the kernel elements K[i, j] will be computed as kernel(X[i], Y[j]).
-            Default is 'rbf'.
+            Default is {self._arg_defaults['kernel']}.
         B : int
-            Base to use in the binary encoding of the QSVM coefficients. See equation (10) in [1]. Default is 2.
+            Base to use in the binary encoding of the QSVM coefficients. See equation (10) in [1].
+            Default is {self._arg_defaults['B']}.
         P : int
-            The shift parameter in the encoding exponent that allows for negative exponents. Default is 0.
+            The shift parameter in the encoding exponent that allows for negative exponents.
+            Default is {self._arg_defaults['P']}.
         K : int
             The number of binary encoding variables to use in the encoding of the QSVM coefficients. See equation
-            (10) in [1]. Default is 3.
+            (10) in [1]. Default is {self._arg_defaults['K']}.
         zeta : float
             A parameter of the QSVM which enforces one of the constraints of a support vector machine in the QSVM
-            QUBO model. See equation (11) in [1]. Default is 1.
+            QUBO model. See equation (11) in [1]. Default is {self._arg_defaults['zeta']}.
         gamma : float
-            Kernel coefficient for 'rbf', 'poly', and 'sigmoid' kernels. Must be non-negative. Default is 1.
+            Kernel coefficient for 'rbf', 'poly', and 'sigmoid' kernels. Must be non-negative.
+            Default is {self._arg_defaults['gamma']}.
         coef0 : float
             Independent term in kernel function. It is only significant in 'poly' and 'sigmoid' kernels.
-            Default is 0.
+            Default is {self._arg_defaults['coef0']}.
         degree : int
             Degree of the polynomial kernel function ('poly'). Must be non-negative. Ignored by all other kernels.
-            Default is 3.
+            Default is {self._arg_defaults['degree']}.
         sampler : str
             The sampler used for annealing. One of 'qa', 'simulate', 'steepest_descent', 'tabu', or 'hybrid'. Only 'qa'
             and 'hybrid' use real quantum hardware. 'qa' will fail if the problem is too large to easily embed on the
-            quantum annealer.  Default is 'steepest_descent'.
+            quantum annealer.  Default is {self._arg_defaults['sampler']}.
         num_reads : int
-            Number of reads of the quantum or simulated annealer to compute the QSVM solution. Default is 100.
+            Number of reads of the quantum or simulated annealer to compute the QSVM solution.
+            Default is {self._arg_defaults['num_reads']}.
         hybrid_time_limit : float
-            The time limit in seconds for the hybrid solver. Default is 3.
+            The time limit in seconds for the hybrid solver. Default is {self._arg_defaults['hybrid_time_limit']}.
         normalize : bool
-            Whether or not to normalize input data. Default is True.
+            Whether or not to normalize input data. Default is {self._arg_defaults['normalize']}.
         warn : bool
-            Warn if samples lie on the decision boundary of the fitted classifier. Default is False.
+            Warn if samples lie on the decision boundary of the fitted classifier.
+            Default is {self._arg_defaults['warn']}.
         '''
 
         self.B = float(B)  # Base of the encoding
@@ -163,7 +184,8 @@ class QSVM:
 
         if kernel not in self.valid_kernels and not callable(kernel):
             raise ValueError(f'Invalid kernel \'{kernel}\'. Valid options are {self.valid_kernels} or a callable')
-        self.kernel = self._define_kernel(kernel, self.gamma, self.coef0, self.degree)
+        self.kernel = kernel
+        self.kernel_func = self._define_kernel(kernel, self.gamma, self.coef0, self.degree)
 
         self.normalize = normalize
         self.hybrid_time_limit = hybrid_time_limit
@@ -231,7 +253,7 @@ class QSVM:
         self.y = y.astype(np.int8)
 
         # Compute the kernel matrix from the train data
-        self._computed_kernel = self.kernel(self.X, self.X)
+        self._computed_kernel = self.kernel_func(self.X, self.X)
 
         # self.qubo = self._compute_qubo(self.y)
         self.qubo = self._compute_qubo_fast(self.y)
@@ -415,12 +437,12 @@ class QSVM:
         for use with bias optimization.
         '''
 
-        # kernel_vals = self.kernel(self.X, X)
+        # kernel_vals = self.kernel_func(self.X, X)
         # return sum(self.alphas[n] * self.y[n] * kernel_vals[n, :] for n in range(self.N))
 
         # Same as above 2 lines, but faster
         computed_kernel = (
-            self._computed_kernel if X.shape == self.X.shape and (X == self.X).all() else self.kernel(self.X, X)
+            self._computed_kernel if X.shape == self.X.shape and (X == self.X).all() else self.kernel_func(self.X, X)
         )
         return (self.alphas * self.y) @ computed_kernel
 
@@ -509,3 +531,17 @@ class QSVM:
 
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __repr__(self) -> str:
+        str_repr = f'{self.__class__.__name__}('
+        for arg, arg_dflt in self._arg_defaults.items():
+            if (arg_val := getattr(self, arg)) != arg_dflt:
+                arg_str = f'\'{arg_val}\'' if isinstance(arg_val, str) else str(arg_val)
+                str_repr += f'{arg}=' + arg_str + ', '
+        if str_repr.endswith(', '):
+            str_repr = str_repr[:-2]
+        str_repr += ')'
+        return str_repr
