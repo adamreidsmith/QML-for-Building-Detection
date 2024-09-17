@@ -59,8 +59,8 @@ Tested 5 quantum kernels with various configurations:
 
 **Best performing quantum kernel**:
 - Data re-uploading with 'full' entanglement
-- Classical SVM: 89.7% (validation), ????% (full dataset)
-- Quantum SVM: 92.3% (validation), 88.47% (full dataset)
+- Classical SVM: 89.7% (validation), 87.87% (full dataset)
+- Quantum SVM: 92.3% (validation), 88.98% (full dataset)
 
 ## Conclusion
 
