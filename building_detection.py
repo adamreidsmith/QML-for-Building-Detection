@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Any
 from itertools import product
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -109,6 +109,7 @@ def optimize_model(
     fit_takes_valid: bool = False,
     model_kw_params: Optional[dict[str, Any]] = None,
     predict_full_dataset: bool = True,
+    score_valid: bool = False,
 ) -> Any:
     if verbose:
         print(f'Optimizing {model_name} model...')
@@ -128,8 +129,7 @@ def optimize_model(
             clf = model(params | kw_params, **model_kw_params)  # Occurs for QSVM Group model
         fit_args = (x_train, y_train) if not fit_takes_valid else (x_train, y_train, x_valid, y_valid)
         clf.fit(*fit_args)
-        acc = clf.score(x_train, y_train)
-        # acc = clf.score(x_valid, y_valid)
+        acc = clf.score(x_valid, y_valid) if score_valid else clf.score(x_train, y_train)
         if acc > best_clfs[1]:
             best_clfs = (clf, acc, [params])
         elif acc == best_clfs[1]:
@@ -256,6 +256,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -289,6 +290,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -328,6 +330,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=model_kw_params,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -388,6 +391,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -423,6 +427,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -457,6 +462,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=model_kw_params,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -531,6 +537,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=True,
         model_kw_params=None,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
     ###################################################################################################################
@@ -561,6 +568,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=True,
+        score_valid=False,
     )
 
 
