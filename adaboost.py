@@ -20,7 +20,8 @@ class AdaBoost:
         Parameters
         ----------
         weak_classifiers : list[Callable[[np.ndarray], np.ndarray]]
-            List of weak classifiers to choose from.
+            List of weak classifiers to choose from. Each classifier should map a 2-d numpy array of
+            samples to 1-d numpy array of binary classes.
         n_estimators : int
             Number of weak classifiers to use. Default is 50.
         '''

@@ -1,11 +1,15 @@
 from typing import Optional
-from collections.abc import Callable, Iterable
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping
 from itertools import combinations, chain
+import warnings
 
 import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import PauliFeatureMap
+from qiskit.quantum_info import Statevector
+
 from qiskit_machine_learning.kernels import FidelityStatevectorKernel
 
 
@@ -58,7 +62,6 @@ class Kernel:
         self,
         feature_map: QuantumCircuit,
         fm_name: Optional[str] = None,
-        preprocess_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> None:
         '''
         Given a feature map φ and input data x and y, the kernel computes the square norm
@@ -70,15 +73,12 @@ class Kernel:
             The parameterized quantum circuit defining the feature map φ.
         fm_name : str | None, optional
             The name of the feature map. Default is None.
-        preprocess_func : Callable[[np.ndarray], np.ndarray] | None, optional
-            A proprocessing function f applied to the data before passing to the feature map.
-            If provided, overlaps are computed between |φ(f(x))> and |φ(f(y))>. Default is None.
         '''
 
         self.fm_name = fm_name
         self.feature_map = feature_map
-        self.kernel = FidelityStatevectorKernel(feature_map=self.feature_map)
-        self.preprocess_func = preprocess_func
+        # self.kernel = FidelityStatevectorKernel(feature_map=self.feature_map)
+        self.kernel = StatevectorKernel(feature_map=self.feature_map, auto_clear_cache=False, max_cache_size=int(1e6))
 
     def __call__(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> np.ndarray:
         '''
@@ -98,10 +98,7 @@ class Kernel:
             The 2D kernel matrix.
         '''
 
-        if self.preprocess_func is not None:
-            x = self.preprocess_func(x)
-        ret = self.kernel.evaluate(x_vec=x, y_vec=y)
-        return ret
+        return self.kernel.evaluate(x_vec=x, y_vec=y)
 
     def __str__(self) -> str:
         str = f'{self.__class__.__name__}'
@@ -111,6 +108,158 @@ class Kernel:
 
     def __repr__(self) -> str:
         return self.__str__()
+
+
+class LimitedSizeDict(OrderedDict):
+    '''
+    Source: https://stackoverflow.com/a/2437645
+    '''
+
+    def __init__(self, *args, **kwargs):
+        self.size_limit = kwargs.pop('size_limit', None)
+        OrderedDict.__init__(self, *args, **kwargs)
+        self._check_size_limit()
+
+    def __setitem__(self, key, value):
+        OrderedDict.__setitem__(self, key, value)
+        self._check_size_limit()
+
+    def _check_size_limit(self):
+        if self.size_limit is not None:
+            while len(self) > self.size_limit:
+                self.popitem(last=False)
+
+
+class StatevectorKernel:
+    def __init__(
+        self, feature_map: QuantumCircuit, auto_clear_cache: bool = True, max_cache_size: Optional[int] = None
+    ) -> None:
+        '''
+        This class is a simplified version of `qiskit_machine_learning.kernels.FidelityStatevectorKernel`
+        that uses a manual cache instead of `functools.lru_cache` for serializability and improves performance.
+
+        Parameters
+        ----------
+        feature_map : qiskit.QuantumCircuit
+            The feature map defining the kernel.
+        auto_clear_cache : bool, optional
+            If True, the cache is cleared each time `evaluate` is called. Default is True.
+        max_cache_size : int | None, optional
+            An optional limit on the cache size. Default is None.
+        '''
+
+        self.feature_map = feature_map
+        self._num_features = feature_map.num_parameters
+        self.auto_clear_cache = auto_clear_cache
+        self.max_cache_size = max_cache_size
+
+        self.clear_cache()
+        self._statevector_cache: LimitedSizeDict
+
+    def evaluate(self, x_vec: np.ndarray, y_vec: Optional[np.ndarray] = None) -> np.ndarray:
+        '''
+        Evaluate the kernel. That is, compute |<φ(x)|φ(y)>|^2 where φ is the feature map.
+
+        Parameters
+        ----------
+        x_vec : np.ndarray
+            The x data. Must be 1D or 2D with shape (n_samples, n_features).
+            If 1D, a single sample is assumed.
+        y_vec : np.ndarray | None, optional
+            The y data. Must be 1D or 2D with shape (n_samples, n_features).
+            If 1D, a single sample is assumed. If None, y_vec is set to x_vec.
+            Default is None.
+
+        Returns
+        -------
+        np.ndarray
+            The kernel matrix of size (x_vec.shape[0], y_vec.shape[0])
+        '''
+
+        if self.auto_clear_cache:
+            self.clear_cache()
+
+        x_vec = self._validate_input(x_vec)
+        y_vec = x_vec if y_vec is None else self._validate_input(y_vec)
+
+        x_svs = np.asarray(list(map(self._get_statevector, x_vec)))
+        y_svs = x_svs if y_vec is x_vec else np.asarray(list(map(self._get_statevector, y_vec)))
+
+        kernel_shape = (x_vec.shape[0], y_vec.shape[0])
+        if kernel_shape[0] * kernel_shape[1] < 50_000:  # Chosen empirically
+            kernel_matrix = np.ones(kernel_shape)
+            for i, x in enumerate(x_svs):
+                for j, y in enumerate(y_svs):
+                    if np.array_equal(x, y):
+                        continue
+                    kernel_matrix[i, j] = np.abs(np.conj(x) @ y) ** 2
+        else:
+            kernel_matrix = np.abs(np.dot(x_svs.conj(), y_svs.T)) ** 2
+
+        return kernel_matrix
+
+    def _validate_input(self, vec: np.ndarray) -> np.ndarray:
+        '''
+        Validate inputs.
+
+        Parameters
+        ----------
+        vec : np.ndarray
+            The input data.
+
+        Returns
+        -------
+        np.ndarray
+            The validated output data.
+        '''
+
+        if vec.ndim > 2:
+            raise ValueError('vec must be a 1D or 2D array')
+
+        if vec.ndim == 1:
+            vec = vec.reshape(1, -1)
+
+        if vec.shape[1] != self._num_features:
+            raise ValueError(
+                f'vec andfeature map have incompatible dimensions.\n'
+                f'vec has {vec.shape[1]} dimensions '
+                f'but feature map has {self._num_features} parameters.'
+            )
+
+        return vec
+
+    def _get_statevector(self, param_values: np.ndarray) -> np.ndarray:
+        '''
+        Compute the statevector by simulating the feature map.
+
+        Parameters
+        ----------
+        param_values : np.ndarray
+            The parameters to pass to the feature map.
+
+        Returns
+        -------
+        np.ndarray
+            The computed statevector.
+        '''
+
+        rounded_params = tuple(round(p, 8) for p in param_values)
+        if rounded_params in self._statevector_cache:
+            # print('Statevector accessed from cache')
+            return self._statevector_cache[rounded_params]
+        qc = self.feature_map.assign_parameters(param_values)
+        # print('Computing statevector from qc')
+        sv = Statevector(qc).data
+        # print('Statevector computed')
+        self._statevector_cache[rounded_params] = sv
+        return sv
+
+    def clear_cache(self) -> None:
+        '''
+        Redefine the statevector cache as an empty mapping.
+        '''
+
+        self._statevector_cache = LimitedSizeDict(size_limit=self.max_cache_size)
 
 
 def get_entanglement_pattern(num_qubits: int, entanglement: str, rep: int = 0) -> Iterable[tuple[int, int]]:
@@ -296,23 +445,31 @@ def iqp_feature_map(num_features: int, reps: int = 1, entanglement: str = 'linea
     return feature_map
 
 
-# def tensorial_feature_map(base_feature_map: QuantumCircuit, reps: int = 2) -> QuantumCircuit:
-#     '''
-#     https://arxiv.org/pdf/1804.00633
+def tensorial_feature_map(base_feature_map: QuantumCircuit, reps: int = 2) -> QuantumCircuit:
+    '''
+    https://arxiv.org/pdf/1804.00633
 
-#     To map input data into vastly higher dimensional spaces we can apply a tensorial
-#     feature map by preparing d copies of the state. If |ψ⟩ is the 'ket' vector produced
-#     by a base feature map, this prepares |ψ⟩ → |ψ⟩^{⊗d}.
+    To map input data into vastly higher dimensional spaces we can apply a tensorial
+    feature map by preparing d copies of the state. If |ψ⟩ is the 'ket' vector produced
+    by a base feature map, this prepares |ψ⟩ → |ψ⟩^{⊗d}.
 
-#     This feature map is not valuable for kernel methods as it merely raises the overlap
-#     to the power d.
-#     '''
+    This feature map is not valuable for kernel methods as it merely raises the overlap
+    to the power d.
+    '''
 
-#     num_qubits_base = base_feature_map.num_qubits
-#     feature_map = QuantumCircuit(num_qubits_base * reps)
-#     for i in range(reps):
-#         feature_map.append(base_feature_map, range(num_qubits_base * i, num_qubits_base * (i + 1)), copy=True)
-#     return feature_map
+    num_qubits_base = base_feature_map.num_qubits
+    feature_map = QuantumCircuit(num_qubits_base * reps)
+    for i in range(reps):
+        feature_map.append(base_feature_map, range(num_qubits_base * i, num_qubits_base * (i + 1)), copy=True)
+    return feature_map
+
+
+def pfm_preprocessing(x: np.ndarray) -> np.ndarray:
+    '''
+    Preprocessing function for the polynomial feature map.
+    '''
+
+    return np.arcsin((x + 1) % 2 - 1)
 
 
 def polynomial_feature_map(num_features: int, qubits_per_feature: int = 2) -> QuantumCircuit:
@@ -345,7 +502,7 @@ def polynomial_feature_map(num_features: int, qubits_per_feature: int = 2) -> Qu
         Phys. Rev. A, 98:032309, Sep 2018. https://arxiv.org/pdf/1803.00745.
     '''
 
-    feature_map = QuantumCircuit(num_features * qubits_per_feature)
+    feature_map = PreprocessingQuantumCircuit(num_features * qubits_per_feature, preprocessing_func=pfm_preprocessing)
     params = ParameterVector('x', num_features)
 
     for k in range(num_features):
@@ -494,3 +651,76 @@ def data_reuploading_feature_map(num_features: int, reps: int = 1, entanglement:
             feature_map.barrier()
 
     return feature_map
+
+
+class PreprocessingQuantumCircuit(QuantumCircuit):
+    '''
+    This class extends a qiskit.QuantumCircuit, allowing a preprocessing function to be called
+    on the parameter values via the `assign_parameters` method before being assigned to the
+    quantum circuit's parameters.
+    '''
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.preprocessing_func = kwargs.pop('preprocessing_func', None)
+        super().__init__(*args, **kwargs)
+
+    def assign_parameters(self, *args, **kwargs):
+        if self.preprocessing_func is not None:
+            parameters = kwargs.pop('parameters', None)
+            if parameters is None:
+                parameters = args[0]
+                args = args[1:]
+
+            if isinstance(parameters, np.ndarray):
+                try:
+                    parameters = self.preprocessing_func(parameters)
+                except Exception as e:
+                    warnings.warn(
+                        'Parameters were passed as a numpy array, but the '
+                        f'preprocessing function is not vectorized:\n{e}'
+                    )
+                    parameters = [self.preprocessing_func(p) for p in parameters]
+            elif isinstance(parameters, Mapping):
+                parameters = {key: self.preprocessing_func(val) for key, val in parameters.items()}
+            elif isinstance(parameters, Iterable):
+                parameters = [self.preprocessing_func(p) for p in parameters]
+            else:
+                raise ValueError('Unknown parameter type')
+
+        return super().assign_parameters(parameters, *args, **kwargs)
+
+
+if __name__ == '__main__':
+    nf = 5
+    sz = 199
+    x = np.random.rand(100, nf)
+    y = np.random.rand(100, nf)
+
+    fm = data_reuploading_feature_map(nf, 1, 'full')
+
+    fsvk = FidelityStatevectorKernel(feature_map=fm)
+    svk = StatevectorKernel(feature_map=fm)
+
+    a = svk.evaluate(x, y)
+    b = fsvk.evaluate(x, y)
+
+    print(np.allclose(a, b))
+    print(np.sum(np.abs(a - b)))
+
+    import time
+    from tqdm import tqdm
+
+    n = 20
+    t = time.perf_counter()
+    for _ in tqdm(range(n)):
+        x = np.random.rand(sz, nf)
+        y = np.random.rand(sz, nf)
+        svk.evaluate(x, y)
+    print(time.perf_counter() - t)
+
+    t = time.perf_counter()
+    for _ in tqdm(range(n)):
+        x = np.random.rand(sz, nf)
+        y = np.random.rand(sz, nf)
+        fsvk.evaluate(x, y)
+    print(time.perf_counter() - t)
