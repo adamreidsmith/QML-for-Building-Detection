@@ -108,6 +108,7 @@ def optimize_model(
     visualize: bool = True,
     fit_takes_valid: bool = False,
     model_kw_params: Optional[dict[str, Any]] = None,
+    predict_full_dataset: bool = True,
 ):
     if verbose:
         print(f'Optimizing {model_name} model...')
@@ -142,17 +143,19 @@ def optimize_model(
     print(f'{model_name} training accuracy: {train_acc:.2%}')
     valid_acc = clf.score(x_valid, y_valid)
     print(f'{model_name} validation accuracy: {valid_acc:.2%}')
-    point_cloud_preds = clf.predict(x_all)
-    full_acc = (point_cloud_preds == y_all).sum() / len(x_all)
-    print(f'{model_name} full dataset accuracy: {full_acc:.2%}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    if predict_full_dataset:
+        point_cloud_preds = clf.predict(x_all)
+        full_acc = (point_cloud_preds == y_all).sum() / len(x_all)
+        print(f'{model_name} full dataset accuracy: {full_acc:.2%}')
+
+        if visualize:
+            visualize_cloud(
+                point_cloud[['x', 'y', 'z']].to_numpy(),
+                colors=point_cloud_preds,
+                cmap='cool',
+                bounds=bounds,
+            )
 
 
 def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
@@ -246,6 +249,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
+        predict_full_dataset=True,
     )
 
     # param_sets = (dict(zip(svm_search_space.keys(), values)) for values in product(*svm_search_space.values()))
@@ -311,6 +315,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
+        predict_full_dataset=True,
     )
 
     # param_sets = (dict(zip(qsvm_search_space.keys(), values)) for values in product(*qsvm_search_space.values()))
@@ -384,6 +389,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=model_kw_params,
+        predict_full_dataset=True,
     )
 
     # param_sets = (
@@ -482,6 +488,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
+        predict_full_dataset=False,
     )
 
     # param_sets = (
@@ -553,6 +560,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
+        predict_full_dataset=False,
     )
 
     # param_sets = (
@@ -625,6 +633,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=model_kw_params,
+        predict_full_dataset=False,
     )
 
     # param_sets = (
@@ -740,6 +749,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=True,
         model_kw_params=None,
+        predict_full_dataset=True,
     )
 
     # param_sets = [dict(zip(qboost_search_space.keys(), values)) for values in product(*qboost_search_space.values())]
@@ -804,6 +814,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
+        predict_full_dataset=True,
     )
 
     # param_sets = [
