@@ -6,6 +6,7 @@ __pycache__
 data
 dep
 results
+logs
 
 gbm.py
 process_results.py
