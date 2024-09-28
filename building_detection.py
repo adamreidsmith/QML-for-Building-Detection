@@ -1,8 +1,9 @@
 import math
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 from itertools import product
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -90,6 +91,70 @@ def downsample_point_cloud(point_cloud: pd.DataFrame) -> pd.DataFrame:
     return point_cloud
 
 
+def optimize_model(
+    model: Any,
+    search_space: dict[str, Iterable[Any]],
+    kw_params: dict[str, Any],
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    x_all: np.ndarray,
+    y_all: np.ndarray,
+    point_cloud: pd.DataFrame,
+    bounds: tuple[float, float, float, float],
+    model_name: str = '',
+    verbose: bool = True,
+    visualize: bool = True,
+    fit_takes_valid: bool = False,
+    model_kw_params: Optional[dict[str, Any]] = None,
+):
+    if verbose:
+        print(f'Optimizing {model_name} model...')
+
+    param_sets = (dict(zip(search_space.keys(), values)) for values in product(*search_space.values()))
+    best_clf = (None, None, 0.0)
+    # Hyperparameter optimization loop
+    for params in tqdm(
+        param_sets,
+        desc=f'Optimizing {model_name}',
+        total=math.prod(len(x) for x in search_space.values()),
+        disable=not verbose,
+    ):
+        if model_kw_params is None:
+            clf = model(**params, **kw_params)
+        else:
+            clf = model(params | kw_params, **model_kw_params)  # Occurs for QSVM Group model
+        fit_args = (x_train, y_train) if not fit_takes_valid else (x_train, y_train, x_valid, y_valid)
+        clf.fit(*fit_args)
+        acc = clf.score(x_train, y_train)
+        # acc = clf.score(x_valid, y_valid)
+        if acc > best_clf[2]:
+            best_clf = (clf, params, acc)
+        with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
+            print(f'{acc:.5f}:{params | kw_params}', file=f)
+
+    clf, params, _ = best_clf
+    if verbose:
+        print(f'{model_name} params: {params | kw_params}')
+
+    train_acc = clf.score(x_train, y_train)
+    print(f'{model_name} training accuracy: {train_acc:.2%}')
+    valid_acc = clf.score(x_valid, y_valid)
+    print(f'{model_name} validation accuracy: {valid_acc:.2%}')
+    point_cloud_preds = clf.predict(x_all)
+    full_acc = (point_cloud_preds == y_all).sum() / len(x_all)
+    print(f'{model_name} full dataset accuracy: {full_acc:.2%}')
+
+    if visualize:
+        visualize_cloud(
+            point_cloud[['x', 'y', 'z']].to_numpy(),
+            colors=point_cloud_preds,
+            cmap='cool',
+            bounds=bounds,
+        )
+
+
 def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '1m_lidar.csv'
     # data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '50cm_lidar.csv'
@@ -161,50 +226,65 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    if verbose:
-        print('Optimizing SVM model...')
     svm_search_space = {'C': np.geomspace(0.00001, 1000, 25), 'gamma': np.geomspace(0.00001, 100, 22)}
     svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
 
-    param_sets = (dict(zip(svm_search_space.keys(), values)) for values in product(*svm_search_space.values()))
-    best_svm = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(param_sets, desc='Optimizing SVM', total=math.prod(len(x) for x in svm_search_space.values())):
-        svm = SVC(**params, **svm_kw_params)
-        svm.fit(train_x_normalized, train_y)
-        acc = svm.score(train_x_normalized, train_y)
-        # acc = svm.score(valid_x_normalized, valid_y)
-        if acc > best_svm[2]:
-            best_svm = (svm, params, acc)
-        with open(LOG_DIR / f'svm_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | svm_kw_params}', file=f)
+    optimize_model(
+        model=SVC,
+        search_space=svm_search_space,
+        kw_params=svm_kw_params,
+        x_train=train_x_normalized,
+        y_train=train_y,
+        x_valid=valid_x_normalized,
+        y_valid=valid_y,
+        x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='SVM',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=None,
+    )
 
-    svm, params, _ = best_svm
-    if verbose:
-        print(f'SVM params: {params | svm_kw_params}')
+    # param_sets = (dict(zip(svm_search_space.keys(), values)) for values in product(*svm_search_space.values()))
+    # best_svm = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(param_sets, desc='Optimizing SVM', total=math.prod(len(x) for x in svm_search_space.values())):
+    #     svm = SVC(**params, **svm_kw_params)
+    #     svm.fit(train_x_normalized, train_y)
+    #     acc = svm.score(train_x_normalized, train_y)
+    #     # acc = svm.score(valid_x_normalized, valid_y)
+    #     if acc > best_svm[2]:
+    #         best_svm = (svm, params, acc)
+    #     with open(LOG_DIR / f'svm_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | svm_kw_params}', file=f)
 
-    svm_train_acc = svm.score(train_x_normalized, train_y)
-    print(f'SVM training accuracy: {svm_train_acc:.2%}')
-    svm_valid_acc = svm.score(valid_x_normalized, valid_y)
-    print(f'SVM validation accuracy: {svm_valid_acc:.2%}')
-    point_cloud_preds = svm.predict((point_cloud[features].to_numpy() - train_mean) / train_std)
-    svm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'SVM full dataset accuracy: {svm_acc:.2%}')
+    # svm, params, _ = best_svm
+    # if verbose:
+    #     print(f'SVM params: {params | svm_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # svm_train_acc = svm.score(train_x_normalized, train_y)
+    # print(f'SVM training accuracy: {svm_train_acc:.2%}')
+    # svm_valid_acc = svm.score(valid_x_normalized, valid_y)
+    # print(f'SVM validation accuracy: {svm_valid_acc:.2%}')
+    # point_cloud_preds = svm.predict((point_cloud[features].to_numpy() - train_mean) / train_std)
+    # svm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'SVM full dataset accuracy: {svm_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # QSVM ############################################################################################################
     ###################################################################################################################
 
-    if verbose:
-        print('Optimizing QSVM model...')
     qsvm_search_space = {
         'B': [2],
         'P': [0, 1, 2],
@@ -214,40 +294,59 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     }
     qsvm_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    param_sets = (dict(zip(qsvm_search_space.keys(), values)) for values in product(*qsvm_search_space.values()))
-    best_qsvm = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets, desc='Optimizing QSVM', total=math.prod(len(x) for x in qsvm_search_space.values())
-    ):
-        qsvm = QSVM(**params, **qsvm_kw_params)
-        qsvm.fit(train_x, train_y)
-        acc = qsvm.score(train_x, train_y)
-        # acc = qsvm.score(valid_x, valid_y)
-        if acc > best_qsvm[2]:
-            best_qsvm = (qsvm, params, acc)
-        with open(LOG_DIR / f'qsvm_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | qsvm_kw_params}', file=f)
+    optimize_model(
+        model=QSVM,
+        search_space=qsvm_search_space,
+        kw_params=qsvm_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='QSVM',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=None,
+    )
 
-    qsvm, params, _ = best_qsvm  # The best QSVM
-    if verbose:
-        print(f'QSVM params: {params | qsvm_kw_params}')
+    # param_sets = (dict(zip(qsvm_search_space.keys(), values)) for values in product(*qsvm_search_space.values()))
+    # best_qsvm = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets, desc='Optimizing QSVM', total=math.prod(len(x) for x in qsvm_search_space.values())
+    # ):
+    #     qsvm = QSVM(**params, **qsvm_kw_params)
+    #     qsvm.fit(train_x, train_y)
+    #     acc = qsvm.score(train_x, train_y)
+    #     # acc = qsvm.score(valid_x, valid_y)
+    #     if acc > best_qsvm[2]:
+    #         best_qsvm = (qsvm, params, acc)
+    #     with open(LOG_DIR / f'qsvm_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | qsvm_kw_params}', file=f)
 
-    qsvm_train_acc = qsvm.score(train_x, train_y)
-    print(f'QSVM training accuracy: {qsvm_train_acc:.2%}')
-    qsvm_valid_acc = qsvm.score(valid_x, valid_y)
-    print(f'QSVM validation accuracy: {qsvm_valid_acc:.2%}')
-    point_cloud_preds = qsvm.predict(point_cloud[features].to_numpy())
-    qsvm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'QSVM full dataset accuracy: {qsvm_acc:.2%}')
+    # qsvm, params, _ = best_qsvm  # The best QSVM
+    # if verbose:
+    #     print(f'QSVM params: {params | qsvm_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # qsvm_train_acc = qsvm.score(train_x, train_y)
+    # print(f'QSVM training accuracy: {qsvm_train_acc:.2%}')
+    # qsvm_valid_acc = qsvm.score(valid_x, valid_y)
+    # print(f'QSVM validation accuracy: {qsvm_valid_acc:.2%}')
+    # point_cloud_preds = qsvm.predict(point_cloud[features].to_numpy())
+    # qsvm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'QSVM full dataset accuracy: {qsvm_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # QSVM Group ######################################################################################################
@@ -258,8 +357,7 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     M = 50  # Size of subsets
     balance_classes = False
 
-    if verbose:
-        print('Optimizing QSVM Group model...')
+    model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_workers}
     qsvm_group_search_space = {
         'B': [2],
         'P': [0, 1, 2],
@@ -269,44 +367,63 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     }
     qsvm_group_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    param_sets = (
-        dict(zip(qsvm_group_search_space.keys(), values)) for values in product(*qsvm_group_search_space.values())
+    optimize_model(
+        model=QSVMGroup,
+        search_space=qsvm_group_search_space,
+        kw_params=qsvm_group_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='QSVM Group',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=model_kw_params,
     )
-    best_qsvm_group = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets, desc='Optimizing QSVM Group', total=math.prod(len(x) for x in qsvm_group_search_space.values())
-    ):
-        qsvm_group = QSVMGroup(
-            params | qsvm_group_kw_params, S=S, M=M, balance_classes=balance_classes, num_workers=num_workers
-        )
-        qsvm_group.fit(train_x, train_y)
-        acc = qsvm_group.score(train_x, train_y)
-        # acc = qsvm_group.score(valid_x, valid_y)
-        if acc > best_qsvm_group[2]:
-            best_qsvm_group = (qsvm_group, params, acc)
-        with open(LOG_DIR / f'qsvm_group_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | qsvm_group_kw_params}', file=f)
 
-    qsvm_group, params, _ = best_qsvm_group  # The best QSVM Group
-    if verbose:
-        print(f'QSVM Group params: {params | qsvm_group_kw_params}')
+    # param_sets = (
+    #     dict(zip(qsvm_group_search_space.keys(), values)) for values in product(*qsvm_group_search_space.values())
+    # )
+    # best_qsvm_group = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets, desc='Optimizing QSVM Group', total=math.prod(len(x) for x in qsvm_group_search_space.values())
+    # ):
+    #     qsvm_group = QSVMGroup(
+    #         params | qsvm_group_kw_params, S=S, M=M, balance_classes=balance_classes, num_workers=num_workers
+    #     )
+    #     qsvm_group.fit(train_x, train_y)
+    #     acc = qsvm_group.score(train_x, train_y)
+    #     # acc = qsvm_group.score(valid_x, valid_y)
+    #     if acc > best_qsvm_group[2]:
+    #         best_qsvm_group = (qsvm_group, params, acc)
+    #     with open(LOG_DIR / f'qsvm_group_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | qsvm_group_kw_params}', file=f)
 
-    qsvm_group_train_acc = qsvm_group.score(train_x, train_y)
-    print(f'QSVM Group training accuracy: {qsvm_group_train_acc:.2%}')
-    qsvm_group_valid_acc = qsvm_group.score(valid_x, valid_y)
-    print(f'QSVM Group validation accuracy: {qsvm_group_valid_acc:.2%}')
-    point_cloud_preds = qsvm_group.predict(point_cloud[features].to_numpy())
-    qsvm_group_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'QSVM Group full dataset accuracy: {qsvm_group_acc:.2%}')
+    # qsvm_group, params, _ = best_qsvm_group  # The best QSVM Group
+    # if verbose:
+    #     print(f'QSVM Group params: {params | qsvm_group_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # qsvm_group_train_acc = qsvm_group.score(train_x, train_y)
+    # print(f'QSVM Group training accuracy: {qsvm_group_train_acc:.2%}')
+    # qsvm_group_valid_acc = qsvm_group.score(valid_x, valid_y)
+    # print(f'QSVM Group validation accuracy: {qsvm_group_valid_acc:.2%}')
+    # point_cloud_preds = qsvm_group.predict(point_cloud[features].to_numpy())
+    # qsvm_group_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'QSVM Group full dataset accuracy: {qsvm_group_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # SVM w/ Quantum Kernel ###########################################################################################
@@ -345,47 +462,64 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     for kernel in uninitialized_kernels:
         kernels.append(Kernel(kernel[0](**kernel[1]), f'{kernel[0].__name__}({kernel[1]})'))
 
-    if verbose:
-        print('Optimizing SVM model with Quantum Kernel...')
     kernel_svm_search_space = {'C': np.geomspace(0.01, 100, 13), 'kernel': kernels}
     kernel_svm_kw_params = {'class_weight': 'balanced'}
 
-    param_sets = (
-        dict(zip(kernel_svm_search_space.keys(), values)) for values in product(*kernel_svm_search_space.values())
+    optimize_model(
+        model=SVC,
+        search_space=kernel_svm_search_space,
+        kw_params=kernel_svm_kw_params,
+        x_train=train_x_normalized,
+        y_train=train_y,
+        x_valid=valid_x_normalized,
+        y_valid=valid_y,
+        x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='Quantum Kernel SVM',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=None,
     )
-    best_kernel_svm = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets, desc='Optimizing Kernel SVM', total=math.prod(len(x) for x in kernel_svm_search_space.values())
-    ):
-        kernel_svm = SVC(**params, **kernel_svm_kw_params)
-        kernel_svm.fit(train_x_normalized, train_y)
-        acc = kernel_svm.score(train_x_normalized, train_y)
-        # acc = kernel_svm.score(valid_x, valid_y)
-        if acc > best_kernel_svm[2]:
-            best_kernel_svm = (kernel_svm, params, acc)
-        with open(LOG_DIR / f'kernel_svm_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | kernel_svm_kw_params}', file=f)
 
-    kernel_svm, params, _ = best_kernel_svm  # The best Quantum Kernel SVM
-    if verbose:
-        print(f'Quantum Kernel SVM params: {params | kernel_svm_kw_params}')
+    # param_sets = (
+    #     dict(zip(kernel_svm_search_space.keys(), values)) for values in product(*kernel_svm_search_space.values())
+    # )
+    # best_kernel_svm = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets, desc='Optimizing Kernel SVM', total=math.prod(len(x) for x in kernel_svm_search_space.values())
+    # ):
+    #     kernel_svm = SVC(**params, **kernel_svm_kw_params)
+    #     kernel_svm.fit(train_x_normalized, train_y)
+    #     acc = kernel_svm.score(train_x_normalized, train_y)
+    #     # acc = kernel_svm.score(valid_x, valid_y)
+    #     if acc > best_kernel_svm[2]:
+    #         best_kernel_svm = (kernel_svm, params, acc)
+    #     with open(LOG_DIR / f'kernel_svm_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | kernel_svm_kw_params}', file=f)
 
-    kernel_svm_train_acc = kernel_svm.score(train_x_normalized, train_y)
-    print(f'Quantum Kernel SVM training accuracy: {kernel_svm_train_acc:.2%}')
-    kernel_svm_valid_acc = kernel_svm.score(valid_x_normalized, valid_y)
-    print(f'Quantum Kernel SVM validation accuracy: {kernel_svm_valid_acc:.2%}')
-    point_cloud_preds = kernel_svm.predict((point_cloud[features].to_numpy() - train_mean) / train_std)
-    kernel_svm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'Quantum Kernel SVM full dataset accuracy: {kernel_svm_acc:.2%}')
+    # kernel_svm, params, _ = best_kernel_svm  # The best Quantum Kernel SVM
+    # if verbose:
+    #     print(f'Quantum Kernel SVM params: {params | kernel_svm_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # kernel_svm_train_acc = kernel_svm.score(train_x_normalized, train_y)
+    # print(f'Quantum Kernel SVM training accuracy: {kernel_svm_train_acc:.2%}')
+    # kernel_svm_valid_acc = kernel_svm.score(valid_x_normalized, valid_y)
+    # print(f'Quantum Kernel SVM validation accuracy: {kernel_svm_valid_acc:.2%}')
+    # point_cloud_preds = kernel_svm.predict((point_cloud[features].to_numpy() - train_mean) / train_std)
+    # kernel_svm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'Quantum Kernel SVM full dataset accuracy: {kernel_svm_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # QSVM w/ Quantum Kernels #########################################################################################
@@ -402,51 +536,69 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     }
     kernel_qsvm_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    param_sets = (
-        dict(zip(kernel_qsvm_search_space.keys(), values)) for values in product(*kernel_qsvm_search_space.values())
+    optimize_model(
+        model=QSVM,
+        search_space=kernel_qsvm_search_space,
+        kw_params=kernel_qsvm_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='Quantum Kernel QSVM',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=None,
     )
-    best_kernel_qsvm = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets,
-        desc='Optimizing Quantum Kernel QSVM',
-        total=math.prod(len(x) for x in kernel_qsvm_search_space.values()),
-    ):
-        kernel_qsvm = QSVM(**params, **kernel_qsvm_kw_params)
-        kernel_qsvm.fit(train_x, train_y)
-        acc = kernel_qsvm.score(train_x, train_y)
-        # acc = kernel_qsvm.score(valid_x, valid_y)
-        if acc > best_kernel_qsvm[2]:
-            best_kernel_qsvm = (kernel_qsvm, params, acc)
-        with open(LOG_DIR / f'kernel_qsvm_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | kernel_qsvm_kw_params}', file=f)
 
-    kernel_qsvm, params, _ = best_kernel_qsvm  # The best Quantum Kernel QSVM
-    if verbose:
-        print(f'Quantum Kernel QSVM params: {params | kernel_qsvm_kw_params}')
+    # param_sets = (
+    #     dict(zip(kernel_qsvm_search_space.keys(), values)) for values in product(*kernel_qsvm_search_space.values())
+    # )
+    # best_kernel_qsvm = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets,
+    #     desc='Optimizing Quantum Kernel QSVM',
+    #     total=math.prod(len(x) for x in kernel_qsvm_search_space.values()),
+    # ):
+    #     kernel_qsvm = QSVM(**params, **kernel_qsvm_kw_params)
+    #     kernel_qsvm.fit(train_x, train_y)
+    #     acc = kernel_qsvm.score(train_x, train_y)
+    #     # acc = kernel_qsvm.score(valid_x, valid_y)
+    #     if acc > best_kernel_qsvm[2]:
+    #         best_kernel_qsvm = (kernel_qsvm, params, acc)
+    #     with open(LOG_DIR / f'kernel_qsvm_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | kernel_qsvm_kw_params}', file=f)
 
-    kernel_qsvm_train_acc = kernel_qsvm.score(train_x, train_y)
-    print(f'Quantum Kernel QSVM training accuracy: {kernel_qsvm_train_acc:.2%}')
-    kernel_qsvm_valid_acc = kernel_qsvm.score(valid_x, valid_y)
-    print(f'Quantum Kernel QSVM validation accuracy: {kernel_qsvm_valid_acc:.2%}')
-    point_cloud_preds = kernel_qsvm.predict(point_cloud[features].to_numpy())
-    kernel_qsvm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'Quantum Kernel QSVM full dataset accuracy: {kernel_qsvm_acc:.2%}')
+    # kernel_qsvm, params, _ = best_kernel_qsvm  # The best Quantum Kernel QSVM
+    # if verbose:
+    #     print(f'Quantum Kernel QSVM params: {params | kernel_qsvm_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # kernel_qsvm_train_acc = kernel_qsvm.score(train_x, train_y)
+    # print(f'Quantum Kernel QSVM training accuracy: {kernel_qsvm_train_acc:.2%}')
+    # kernel_qsvm_valid_acc = kernel_qsvm.score(valid_x, valid_y)
+    # print(f'Quantum Kernel QSVM validation accuracy: {kernel_qsvm_valid_acc:.2%}')
+    # point_cloud_preds = kernel_qsvm.predict(point_cloud[features].to_numpy())
+    # kernel_qsvm_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'Quantum Kernel QSVM full dataset accuracy: {kernel_qsvm_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # QSVM Group w/ Quantum Kernels ###################################################################################
     ###################################################################################################################
 
-    if verbose:
-        print('Optimizing Quantum Kernel QSVM Group model...')
+    model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_workers}
     kernel_qsvm_group_search_space = {
         'B': [2],
         'P': [0, 1],
@@ -456,47 +608,66 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     }
     kernel_qsvm_group_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    param_sets = (
-        dict(zip(kernel_qsvm_group_search_space.keys(), values))
-        for values in product(*kernel_qsvm_group_search_space.values())
+    optimize_model(
+        model=QSVMGroup,
+        search_space=kernel_qsvm_group_search_space,
+        kw_params=kernel_qsvm_group_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='Quantum Kernel QSVM Group',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=model_kw_params,
     )
-    best_kernel_qsvm_group = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets,
-        desc='Optimizing Quantum Kernel QSVM Group',
-        total=math.prod(len(x) for x in kernel_qsvm_group_search_space.values()),
-    ):
-        kernel_qsvm_group = QSVMGroup(
-            params | kernel_qsvm_group_kw_params, S=S, M=M, balance_classes=balance_classes, num_workers=num_workers
-        )
-        kernel_qsvm_group.fit(train_x, train_y)
-        acc = kernel_qsvm_group.score(train_x, train_y)
-        # acc = kernel_qsvm_group.score(valid_x, valid_y)
-        if acc > best_kernel_qsvm_group[2]:
-            best_kernel_qsvm_group = (kernel_qsvm_group, params, acc)
-        with open(LOG_DIR / f'kernel_qsvm_group_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | kernel_qsvm_group_kw_params}', file=f)
 
-    kernel_qsvm_group, params, _ = best_kernel_qsvm_group  # The best Quantum Kernel QSVM Group
-    if verbose:
-        print(f'Quantum Kernel QSVM Group params: {params | kernel_qsvm_group_kw_params}')
+    # param_sets = (
+    #     dict(zip(kernel_qsvm_group_search_space.keys(), values))
+    #     for values in product(*kernel_qsvm_group_search_space.values())
+    # )
+    # best_kernel_qsvm_group = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets,
+    #     desc='Optimizing Quantum Kernel QSVM Group',
+    #     total=math.prod(len(x) for x in kernel_qsvm_group_search_space.values()),
+    # ):
+    #     kernel_qsvm_group = QSVMGroup(
+    #         params | kernel_qsvm_group_kw_params, S=S, M=M, balance_classes=balance_classes, num_workers=num_workers
+    #     )
+    #     kernel_qsvm_group.fit(train_x, train_y)
+    #     acc = kernel_qsvm_group.score(train_x, train_y)
+    #     # acc = kernel_qsvm_group.score(valid_x, valid_y)
+    #     if acc > best_kernel_qsvm_group[2]:
+    #         best_kernel_qsvm_group = (kernel_qsvm_group, params, acc)
+    #     with open(LOG_DIR / f'kernel_qsvm_group_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | kernel_qsvm_group_kw_params}', file=f)
 
-    kernel_qsvm_group_train_acc = kernel_qsvm_group.score(train_x, train_y)
-    print(f'Quantum Kernel QSVM Group training accuracy: {kernel_qsvm_group_train_acc:.2%}')
-    kernel_qsvm_group_valid_acc = kernel_qsvm_group.score(valid_x, valid_y)
-    print(f'Quantum Kernel QSVM Group validation accuracy: {kernel_qsvm_group_valid_acc:.2%}')
-    point_cloud_preds = kernel_qsvm_group.predict(point_cloud[features].to_numpy())
-    kernel_qsvm_group_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'Quantum Kernel QSVM Group full dataset accuracy: {kernel_qsvm_group_acc:.2%}')
+    # kernel_qsvm_group, params, _ = best_kernel_qsvm_group  # The best Quantum Kernel QSVM Group
+    # if verbose:
+    #     print(f'Quantum Kernel QSVM Group params: {params | kernel_qsvm_group_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # kernel_qsvm_group_train_acc = kernel_qsvm_group.score(train_x, train_y)
+    # print(f'Quantum Kernel QSVM Group training accuracy: {kernel_qsvm_group_train_acc:.2%}')
+    # kernel_qsvm_group_valid_acc = kernel_qsvm_group.score(valid_x, valid_y)
+    # print(f'Quantum Kernel QSVM Group validation accuracy: {kernel_qsvm_group_valid_acc:.2%}')
+    # point_cloud_preds = kernel_qsvm_group.predict(point_cloud[features].to_numpy())
+    # kernel_qsvm_group_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'Quantum Kernel QSVM Group full dataset accuracy: {kernel_qsvm_group_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # Weak Classifiers ################################################################################################
@@ -549,46 +720,62 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     # QBoost ##########################################################################################################
     ###################################################################################################################
 
-    if verbose:
-        print('Optimizing QBoost model...')
-    # Optimize the QBoost classifier
     qboost_search_space = {'B': [2], 'P': [0, 1, 2, 3, 4], 'K': [3, 4, 5, 6, 7, 8]}
     qboost_kw_params = {'weak_classifiers': weak_classifiers, 'lbda': (0.0, 2.1, 0.1), 'num_reads': 100}
 
-    param_sets = [dict(zip(qboost_search_space.keys(), values)) for values in product(*qboost_search_space.values())]
-    best_qboost = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets, desc='Optimizing QBoost', total=math.prod(len(x) for x in qboost_search_space.values())
-    ):
-        qboost = QBoost(**params, **qboost_kw_params)
-        qboost.fit(train_x, train_y, valid_x, valid_y)
-        acc = qboost.score(train_x, train_y)
-        # acc = qboost.score(valid_x, valid_y)
-        if acc > best_qboost[2]:
-            best_qboost = (qboost, params, acc)
-        with open(LOG_DIR / f'qboost_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | qboost_kw_params}', file=f)
+    optimize_model(
+        model=QBoost,
+        search_space=qboost_search_space,
+        kw_params=qboost_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='QBoost',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=True,
+        model_kw_params=None,
+    )
 
-    qboost, params, _ = best_qboost  # The best QBoost
-    if verbose:
-        print(f'QBoost params: {params | qboost_kw_params}')
+    # param_sets = [dict(zip(qboost_search_space.keys(), values)) for values in product(*qboost_search_space.values())]
+    # best_qboost = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets, desc='Optimizing QBoost', total=math.prod(len(x) for x in qboost_search_space.values())
+    # ):
+    #     qboost = QBoost(**params, **qboost_kw_params)
+    #     qboost.fit(train_x, train_y, valid_x, valid_y)
+    #     acc = qboost.score(train_x, train_y)
+    #     # acc = qboost.score(valid_x, valid_y)
+    #     if acc > best_qboost[2]:
+    #         best_qboost = (qboost, params, acc)
+    #     with open(LOG_DIR / f'qboost_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | qboost_kw_params}', file=f)
 
-    qboost_train_acc = qboost.score(train_x, train_y)
-    print(f'QBoost training accuracy: {qboost_train_acc:.2%}')
-    qboost_valid_acc = qboost.score(valid_x, valid_y)
-    print(f'QBoost validation accuracy: {qboost_valid_acc:.2%}')
-    point_cloud_preds = qboost.predict(point_cloud[features].to_numpy())
-    qboost_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'QBoost full dataset accuracy: {qboost_acc:.2%}')
+    # qboost, params, _ = best_qboost  # The best QBoost
+    # if verbose:
+    #     print(f'QBoost params: {params | qboost_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # qboost_train_acc = qboost.score(train_x, train_y)
+    # print(f'QBoost training accuracy: {qboost_train_acc:.2%}')
+    # qboost_valid_acc = qboost.score(valid_x, valid_y)
+    # print(f'QBoost validation accuracy: {qboost_valid_acc:.2%}')
+    # point_cloud_preds = qboost.predict(point_cloud[features].to_numpy())
+    # qboost_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'QBoost full dataset accuracy: {qboost_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
     ###################################################################################################################
     # AdaBoost ########################################################################################################
@@ -600,42 +787,61 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
     adaboost_search_space = {'n_estimators': list(range(6, 100, 2))}
     adaboost_kw_params = {'weak_classifiers': weak_classifiers}
 
-    param_sets = [
-        dict(zip(adaboost_search_space.keys(), values)) for values in product(*adaboost_search_space.values())
-    ]
-    best_adaboost = (None, None, 0.0)
-    # Hyperparameter optimization loop
-    for params in tqdm(
-        param_sets, desc='Optimizing AdaBoost', total=math.prod(len(x) for x in adaboost_search_space.values())
-    ):
-        adaboost = AdaBoost(**params, **adaboost_kw_params)
-        adaboost.fit(train_x, train_y)
-        acc = adaboost.score(train_x, train_y)
-        # acc = adaboost.score(valid_x, valid_y)
-        if acc > best_adaboost[2]:
-            best_adaboost = (adaboost, params, acc)
-        with open(LOG_DIR / f'adaboost_{SEED}.txt', 'a') as f:
-            print(f'{acc:.5f}:{params | adaboost_kw_params}', file=f)
+    optimize_model(
+        model=AdaBoost,
+        search_space=adaboost_search_space,
+        kw_params=adaboost_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        point_cloud=point_cloud,
+        bounds=bounds,
+        model_name='AdaBoost',
+        verbose=verbose,
+        visualize=visualize,
+        fit_takes_valid=False,
+        model_kw_params=None,
+    )
 
-    adaboost, params, _ = best_adaboost  # The best AdaBoost
-    if verbose:
-        print(f'AdaBoost params: {params | adaboost_kw_params}')
+    # param_sets = [
+    #     dict(zip(adaboost_search_space.keys(), values)) for values in product(*adaboost_search_space.values())
+    # ]
+    # best_adaboost = (None, None, 0.0)
+    # # Hyperparameter optimization loop
+    # for params in tqdm(
+    #     param_sets, desc='Optimizing AdaBoost', total=math.prod(len(x) for x in adaboost_search_space.values())
+    # ):
+    #     adaboost = AdaBoost(**params, **adaboost_kw_params)
+    #     adaboost.fit(train_x, train_y)
+    #     acc = adaboost.score(train_x, train_y)
+    #     # acc = adaboost.score(valid_x, valid_y)
+    #     if acc > best_adaboost[2]:
+    #         best_adaboost = (adaboost, params, acc)
+    #     with open(LOG_DIR / f'adaboost_{SEED}.txt', 'a') as f:
+    #         print(f'{acc:.5f}:{params | adaboost_kw_params}', file=f)
 
-    adaboost_train_acc = adaboost.score(train_x, train_y)
-    print(f'AdaBoost training accuracy: {adaboost_train_acc:.2%}')
-    adaboost_valid_acc = adaboost.score(valid_x, valid_y)
-    print(f'AdaBoost validation accuracy: {adaboost_valid_acc:.2%}')
-    point_cloud_preds = adaboost.predict(point_cloud[features].to_numpy())
-    adaboost_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
-    print(f'AdaBoost full dataset accuracy: {adaboost_acc:.2%}')
+    # adaboost, params, _ = best_adaboost  # The best AdaBoost
+    # if verbose:
+    #     print(f'AdaBoost params: {params | adaboost_kw_params}')
 
-    if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud_preds,
-            cmap='cool',
-            bounds=bounds,
-        )
+    # adaboost_train_acc = adaboost.score(train_x, train_y)
+    # print(f'AdaBoost training accuracy: {adaboost_train_acc:.2%}')
+    # adaboost_valid_acc = adaboost.score(valid_x, valid_y)
+    # print(f'AdaBoost validation accuracy: {adaboost_valid_acc:.2%}')
+    # point_cloud_preds = adaboost.predict(point_cloud[features].to_numpy())
+    # adaboost_acc = (point_cloud_preds == point_cloud.classification.to_numpy()).sum() / len(point_cloud)
+    # print(f'AdaBoost full dataset accuracy: {adaboost_acc:.2%}')
+
+    # if visualize:
+    #     visualize_cloud(
+    #         point_cloud[['x', 'y', 'z']].to_numpy(),
+    #         colors=point_cloud_preds,
+    #         cmap='cool',
+    #         bounds=bounds,
+    #     )
 
 
 if __name__ == '__main__':
