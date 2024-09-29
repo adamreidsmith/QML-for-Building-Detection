@@ -1,4 +1,5 @@
 import heapq
+import warnings
 from typing import Optional
 from collections.abc import Sequence, Callable
 from collections import defaultdict
@@ -56,9 +57,6 @@ class QBoost:
 
         # Regularization vars
         self.lbda = lbda  # (lambda_start, lambda_stop, lambda_step)
-        # We must choose kappa > lbda / epsilon in order for L0 regularization to work properly.
-        # Here, epsilon is the smallest positive value the QBoost coefficients can take
-        self.kappa = lambda lbda: 2 * lbda * self.B**self.P
 
         self.num_reads = num_reads
 
@@ -67,6 +65,11 @@ class QBoost:
         # Instantiated when `fit` is called
         self._strong_classifier_coeffs: Optional[list[float]] = None
         self._classifier_pool_indices: list[int]
+
+    def kappa(self, lbda: float) -> float:
+        # We must choose kappa > lbda / epsilon in order for L0 regularization to work properly.
+        # Here, epsilon is the smallest positive value the QBoost coefficients can take
+        return 2 * lbda * self.B**self.P
 
     def fit(
         self,
@@ -113,6 +116,7 @@ class QBoost:
                 val_clf_results[i] = clf(x_val)
         else:
             x_val, y_val = x_train, y_train
+            n_val_samples = len(x_val)
             val_clf_results = train_clf_results
 
         # d_inner is a distribution over training samples
@@ -299,7 +303,8 @@ class QBoost:
 
         if self._strong_classifier_coeffs is None:
             raise RuntimeError(
-                f'This QBoost instance is not fitted yet. Call \'fit\' with appropriate arguments before calling \'predict\''
+                f'This QBoost instance is not fitted yet. '
+                'Call \'fit\' with appropriate arguments before calling \'predict\''
             )
 
         # Only weak classifiers present in `self._classifier_pool_indices` are included in the strong classifier
@@ -312,10 +317,16 @@ class QBoost:
             classification_results[i] = clf(x)
 
         # Sample the strong classifier
-        strong_clf_results = np.empty(n_samples)
+        strong_clf_results = np.empty(n_samples, dtype=np.int8)
         for s in range(n_samples):
-            prediction = np.sign(np.dot(self._strong_classifier_coeffs, classification_results[:, s]))
+            prediction = np.sign(np.dot(self._strong_classifier_coeffs, classification_results[:, s])).astype(np.int8)
             strong_clf_results[s] = prediction
+
+        if np.any(strong_clf_results == 0):
+            warnings.warn(
+                f'{sum(strong_clf_results == 0)} samples lie on the decision boundary. Arbitrarily assigning class 1.'
+            )
+            strong_clf_results[strong_clf_results == 0] = 1  # Go with class 1 if we don't know
 
         return strong_clf_results
 

@@ -1,4 +1,6 @@
+import warnings
 from typing import Callable
+
 import numpy as np
 
 
@@ -91,7 +93,11 @@ class AdaBoost:
         '''
 
         clf_preds = np.array([clf(X) for clf in self.selected_classifiers])
-        return np.sign(np.dot(self.alphas, clf_preds))
+        preds = np.sign(np.dot(self.alphas, clf_preds))
+        if np.any(preds == 0):
+            warnings.warn(f'{sum(preds == 0)} samples lie on the decision boundary. Arbitrarily assigning class 1.')
+            preds[preds == 0] = 1  # Go with class 1 if we don't know
+        return preds
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
         '''
