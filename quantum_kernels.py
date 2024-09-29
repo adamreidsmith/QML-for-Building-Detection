@@ -173,7 +173,7 @@ class StatevectorKernel:
         Returns
         -------
         np.ndarray
-            The kernel matrix of size (x_vec.shape[0], y_vec.shape[0])
+            The kernel matrix of size (x_vec.shape[0], y_vec.shape[0]).
         '''
 
         if self.auto_clear_cache:
@@ -243,15 +243,12 @@ class StatevectorKernel:
             The computed statevector.
         '''
 
-        rounded_params = tuple(round(p, 8) for p in param_values)
-        if rounded_params in self._statevector_cache:
-            # print('Statevector accessed from cache')
-            return self._statevector_cache[rounded_params]
+        param_tuple = tuple(param_values)
+        if param_tuple in self._statevector_cache:
+            return self._statevector_cache[param_tuple]
         qc = self.feature_map.assign_parameters(param_values)
-        # print('Computing statevector from qc')
         sv = Statevector(qc).data
-        # print('Statevector computed')
-        self._statevector_cache[rounded_params] = sv
+        self._statevector_cache[param_tuple] = sv
         return sv
 
     def clear_cache(self) -> None:
@@ -691,8 +688,8 @@ class PreprocessingQuantumCircuit(QuantumCircuit):
 
 
 if __name__ == '__main__':
-    nf = 5
-    sz = 199
+    nf = 4
+    sz = 1000
     x = np.random.rand(100, nf)
     y = np.random.rand(100, nf)
 
