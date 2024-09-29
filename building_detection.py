@@ -114,7 +114,7 @@ def cross_validation(
     model: Any,
     x_train: np.ndarray,
     y_train: np.ndarray,
-    k: int = 3,
+    k: int,
     x_valid: Optional[np.ndarray] = None,
     y_valid: Optional[np.ndarray] = None,
     seed: Optional[int] = None,
@@ -228,15 +228,15 @@ def optimize_model(
     best_clf.fit(x_train, y_train)
 
     # Predict and print results
-    train_acc, train_f1 = acc_f1(clf.predict(x_train), y_train)
+    train_acc, train_f1 = acc_f1(best_clf.predict(x_train), y_train)
     print(f'{model_name} training accuracy: {train_acc:.2%}')
     print(f'{model_name} training F1:       {train_f1:.3f}')
-    valid_acc, valid_f1 = acc_f1(clf.predict(x_valid), y_valid)
+    valid_acc, valid_f1 = acc_f1(best_clf.predict(x_valid), y_valid)
     print(f'{model_name} validation accuracy: {valid_acc:.2%}')
     print(f'{model_name} validation F1:       {valid_f1:.3f}')
 
     if predict_full_dataset:
-        point_cloud_preds = clf.predict(x_all)
+        point_cloud_preds = best_clf.predict(x_all)
         full_acc, full_f1 = acc_f1(point_cloud_preds, y_all)
         print(f'{model_name} full dataset accuracy: {full_acc:.2%}')
         print(f'{model_name} full dataset F1:       {full_f1:.3f}')
@@ -629,8 +629,8 @@ def main():
         kw_params=qboost_kw_params,
         x_train=train_x,
         y_train=train_y,
-        x_valid=valid_x,
-        y_valid=valid_y,
+        x_valid=valid_x[:n_train_samples],
+        y_valid=valid_y[:n_train_samples],
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
         k_folds=k_folds,
