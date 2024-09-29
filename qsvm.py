@@ -10,7 +10,7 @@ from dwave.system import LeapHybridSampler, DWaveSampler, AutoEmbeddingComposite
 from sklearn.metrics.pairwise import linear_kernel, rbf_kernel, polynomial_kernel, sigmoid_kernel
 from scipy.special import softmax
 
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 
 def retry(
@@ -721,5 +721,5 @@ if __name__ == '__main__':
     x2 = np.random.rand(1000 * sz, 4)
 
     t = time.perf_counter()
-    print(qsvmgroup.predict(x2).shape)
+    qsvmgroup.predict(x2)
     print(time.perf_counter() - t)

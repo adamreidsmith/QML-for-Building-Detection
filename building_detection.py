@@ -1,15 +1,18 @@
 import math
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Any
 from itertools import product
 from collections.abc import Iterable
+
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import open3d as o3d
 from sklearn.svm import SVC
+from sklearn.model_selection import KFold
 from tqdm import tqdm
 from dotenv import load_dotenv
 
@@ -107,6 +110,40 @@ def acc_f1(predictions: np.ndarray, labels: np.ndarray) -> float:
     return acc, f1
 
 
+def cross_validation(
+    model: Any,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    k: int = 3,
+    x_valid: Optional[np.ndarray] = None,
+    y_valid: Optional[np.ndarray] = None,
+    seed: Optional[int] = None,
+) -> float:
+    kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+
+    accs, f1s = [], []
+    for train_indices, test_indices in kf.split(x_train):
+        clf = deepcopy(model)
+
+        x_train_fold, y_train_fold = x_train[train_indices], y_train[train_indices]
+        x_test_fold, y_test_fold = x_train[test_indices], y_train[test_indices]
+
+        if x_valid is not None and y_valid is not None:
+            clf.fit(x_train_fold, y_train_fold, x_valid, y_valid)
+        else:
+            clf.fit(x_train_fold, y_train_fold)
+
+        preds = clf.predict(x_test_fold)
+        acc, f1 = acc_f1(preds, y_test_fold)
+        accs.append(acc)
+        f1s.append(f1)
+
+    avg_acc = np.mean(accs)
+    avg_f1 = np.mean(f1s)
+
+    return avg_acc, avg_f1
+
+
 def optimize_model(
     model: Any,
     search_space: dict[str, Iterable[Any]],
@@ -117,6 +154,7 @@ def optimize_model(
     y_valid: np.ndarray,
     x_all: np.ndarray,
     y_all: np.ndarray,
+    k_folds: int,
     point_cloud: pd.DataFrame,
     bounds: tuple[float, float, float, float],
     model_name: str = '',
@@ -131,8 +169,9 @@ def optimize_model(
     if verbose:
         print(f'Optimizing {model_name} model...')
 
+    # Divide the search space into param dictionaries we can pass to the model
     param_sets = (dict(zip(search_space.keys(), values)) for values in product(*search_space.values()))
-    best_clfs = (None, -1.0, [None])  # (classifier, accuracy, [params, ...])
+    best_clfs = (-1.0, [None])  # (accuracy, [params, ...])
     # Hyperparameter optimization loop
     for params in tqdm(
         param_sets,
@@ -140,28 +179,55 @@ def optimize_model(
         total=math.prod(len(x) for x in search_space.values()),
         disable=not verbose,
     ):
+        # QSVM Group model is initialized diffrently to the others
         if model_kw_params is None:
             clf = model(**params, **kw_params)
         else:
             clf = model(params | kw_params, **model_kw_params)  # Occurs for QSVM Group model
-        fit_args = (x_train, y_train) if not fit_takes_valid else (x_train, y_train, x_valid, y_valid)
-        clf.fit(*fit_args)
-        preds = clf.predict(x_valid) if score_valid else clf.predict(x_train)
-        acc, f1 = acc_f1(preds, y_valid if score_valid else y_train)
-        if acc > best_clfs[1]:
-            best_clfs = (clf, acc, [params])
-        elif acc == best_clfs[1]:
-            best_clfs[2].append(params)
+
+        # If we are only using one fold, do not use cross-validation
+        if k_folds == 1:
+            # The fit method for QBoost takes validation data as well
+            clf.fit(x_train, y_train) if not fit_takes_valid else clf.fit(x_train, y_train, x_valid, y_valid)
+            preds = clf.predict(x_valid) if score_valid else clf.predict(x_train)
+            acc, f1 = acc_f1(preds, y_valid if score_valid else y_train)
+        else:
+            # The fit method for QBoost takes validation data as well
+            fit_args = (
+                dict(x_train=x_train, y_train=y_train)
+                if not fit_takes_valid
+                else dict(x_train=x_train, y_train=y_train, x_valid=x_valid, y_valid=y_valid)
+            )
+            # Fit using cross validation
+            acc, f1 = cross_validation(model=clf, k=k_folds, **fit_args)
+
+        # Update the best known model
+        if acc > best_clfs[0]:
+            best_clfs = (acc, [params])
+        elif acc == best_clfs[0]:
+            best_clfs[1].append(params)
+
+        # Write results to a file
         if write_data:
             with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
                 print(f'{acc:.6f}:{f1:.4f}:{params | kw_params}', file=f)
 
-    clf, acc, param_sets = best_clfs
+    # The best accuracy, and a list of the parameter sets that provide that accuracy
+    acc, param_sets = best_clfs
+
     if verbose:
         print(f'{model_name} best params with training accuracy {acc:.2%}:')
         for params in param_sets:
             print(f'\t{params | kw_params}')
 
+    # Define and train the best classifier on the whole training set
+    if model_kw_params is None:
+        best_clf = model(**param_sets[0], **kw_params)
+    else:
+        best_clf = model(param_sets[0] | kw_params, **model_kw_params)
+    best_clf.fit(x_train, y_train)
+
+    # Predict and print results
     train_acc, train_f1 = acc_f1(clf.predict(x_train), y_train)
     print(f'{model_name} training accuracy: {train_acc:.2%}')
     print(f'{model_name} training F1:       {train_f1:.3f}')
@@ -191,11 +257,12 @@ def main():
     # data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '50cm_lidar.csv'
     full_point_cloud = pd.read_csv(data_file)
 
-    predict_full_dataset = True
+    predict_full_dataset = False
     verbose = True
-    visualize = True
+    visualize = False
     num_workers = 6
-    write_data = False
+    write_data = True
+    k_folds = 3
 
     bounds = (full_point_cloud.x.min(), full_point_cloud.x.max(), full_point_cloud.y.min(), full_point_cloud.y.max())
 
@@ -216,7 +283,7 @@ def main():
 
     # Choose a random subset of points as a train set
     n_train_samples = 1000
-    n_valid_samples = 1000
+    n_valid_samples = 50000
 
     indices = np.arange(len(point_cloud))
     np.random.shuffle(indices)
@@ -260,7 +327,7 @@ def main():
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    svm_search_space = {'C': np.geomspace(0.00001, 1000, 25), 'gamma': np.geomspace(0.00001, 100, 22)}
+    svm_search_space = {'C': np.geomspace(0.001, 100, 16), 'gamma': np.geomspace(0.001, 100, 16)}
     svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
 
     optimize_model(
@@ -273,6 +340,7 @@ def main():
         y_valid=valid_y,
         x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='SVM',
@@ -308,6 +376,7 @@ def main():
         y_valid=valid_y,
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='QSVM',
@@ -349,6 +418,7 @@ def main():
         y_valid=valid_y,
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='QSVM Group',
@@ -411,6 +481,7 @@ def main():
         y_valid=valid_y,
         x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='Quantum Kernel SVM',
@@ -448,6 +519,7 @@ def main():
         y_valid=valid_y,
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='Quantum Kernel QSVM',
@@ -484,6 +556,7 @@ def main():
         y_valid=valid_y,
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='Quantum Kernel QSVM Group',
@@ -560,6 +633,7 @@ def main():
         y_valid=valid_y,
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='QBoost',
@@ -592,6 +666,7 @@ def main():
         y_valid=valid_y,
         x_all=point_cloud[features].to_numpy(),
         y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
         point_cloud=point_cloud,
         bounds=bounds,
         model_name='AdaBoost',
