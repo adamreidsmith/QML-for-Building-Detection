@@ -91,6 +91,22 @@ def downsample_point_cloud(point_cloud: pd.DataFrame) -> pd.DataFrame:
     return point_cloud
 
 
+def acc_f1(predictions: np.ndarray, labels: np.ndarray) -> float:
+    pos_preds = predictions == 1
+    neg_preds = predictions == -1
+    pos_labels = labels == 1
+    neg_labels = labels == -1
+
+    tp = np.sum(pos_preds & pos_labels)
+    fp = np.sum(pos_preds & neg_labels)
+    fn = np.sum(neg_preds & pos_labels)
+
+    acc = np.sum(predictions == labels) / labels.shape[0]
+    f1 = tp / (tp + 0.5 * (fp + fn))
+
+    return acc, f1
+
+
 def optimize_model(
     model: Any,
     search_space: dict[str, Iterable[Any]],
@@ -110,12 +126,13 @@ def optimize_model(
     model_kw_params: Optional[dict[str, Any]] = None,
     predict_full_dataset: bool = True,
     score_valid: bool = False,
+    write_data: bool = True,
 ) -> Any:
     if verbose:
         print(f'Optimizing {model_name} model...')
 
     param_sets = (dict(zip(search_space.keys(), values)) for values in product(*search_space.values()))
-    best_clfs = (None, -1.0, [None])  # (Classifier, accuracy, [params, ...])
+    best_clfs = (None, -1.0, [None])  # (classifier, accuracy, [params, ...])
     # Hyperparameter optimization loop
     for params in tqdm(
         param_sets,
@@ -129,13 +146,15 @@ def optimize_model(
             clf = model(params | kw_params, **model_kw_params)  # Occurs for QSVM Group model
         fit_args = (x_train, y_train) if not fit_takes_valid else (x_train, y_train, x_valid, y_valid)
         clf.fit(*fit_args)
-        acc = clf.score(x_valid, y_valid) if score_valid else clf.score(x_train, y_train)
+        preds = clf.predict(x_valid) if score_valid else clf.predict(x_train)
+        acc, f1 = acc_f1(preds, y_valid if score_valid else y_train)
         if acc > best_clfs[1]:
             best_clfs = (clf, acc, [params])
         elif acc == best_clfs[1]:
             best_clfs[2].append(params)
-        with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
-            print(f'{acc:.6f}:{params | kw_params}', file=f)
+        if write_data:
+            with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
+                print(f'{acc:.6f}:{f1:.4f}:{params | kw_params}', file=f)
 
     clf, acc, param_sets = best_clfs
     if verbose:
@@ -143,15 +162,18 @@ def optimize_model(
         for params in param_sets:
             print(f'\t{params | kw_params}')
 
-    train_acc = clf.score(x_train, y_train)
+    train_acc, train_f1 = acc_f1(clf.predict(x_train), y_train)
     print(f'{model_name} training accuracy: {train_acc:.2%}')
-    valid_acc = clf.score(x_valid, y_valid)
+    print(f'{model_name} training F1:       {train_f1:.3f}')
+    valid_acc, valid_f1 = acc_f1(clf.predict(x_valid), y_valid)
     print(f'{model_name} validation accuracy: {valid_acc:.2%}')
+    print(f'{model_name} validation F1:       {valid_f1:.3f}')
 
     if predict_full_dataset:
         point_cloud_preds = clf.predict(x_all)
-        full_acc = (point_cloud_preds == y_all).sum() / len(x_all)
+        full_acc, full_f1 = acc_f1(point_cloud_preds, y_all)
         print(f'{model_name} full dataset accuracy: {full_acc:.2%}')
+        print(f'{model_name} full dataset F1:       {full_f1:.3f}')
 
         if visualize:
             visualize_cloud(
@@ -164,15 +186,18 @@ def optimize_model(
     return clf
 
 
-def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
+def main():
     data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '1m_lidar.csv'
     # data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '50cm_lidar.csv'
     full_point_cloud = pd.read_csv(data_file)
 
+    predict_full_dataset = True
+    verbose = True
+    visualize = True
+    num_workers = 6
+    write_data = False
+
     bounds = (full_point_cloud.x.min(), full_point_cloud.x.max(), full_point_cloud.y.min(), full_point_cloud.y.max())
-    # visualize_cloud(
-    #     full_point_cloud[['x', 'y', 'z']].to_numpy(), colors=full_point_cloud.classification.to_numpy(), bounds=bounds
-    # )
 
     # Map building points to 1 and all others to 0
     full_point_cloud.classification = full_point_cloud.classification.map(lambda x: 1 if x == 6 else -1)
@@ -255,8 +280,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -289,8 +315,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -329,8 +356,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=model_kw_params,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -390,8 +418,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -426,8 +455,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -461,8 +491,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=model_kw_params,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -536,8 +567,9 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=True,
         model_kw_params=None,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
     ###################################################################################################################
@@ -567,10 +599,11 @@ def main(verbose: bool = True, visualize: bool = True, num_workers: int = 5):
         visualize=visualize,
         fit_takes_valid=False,
         model_kw_params=None,
-        predict_full_dataset=True,
+        predict_full_dataset=predict_full_dataset,
         score_valid=False,
+        write_data=write_data,
     )
 
 
 if __name__ == '__main__':
-    main(visualize=False)
+    main()
