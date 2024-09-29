@@ -667,9 +667,9 @@ class QSVMGroup:
         '''
 
         # Get predictions for each QSVM
-        results = np.empty((self.S, X.shape[0]), dtype=np.int8)
-        for s, qsvm in enumerate(self._trained_qsvms):
-            results[s] = qsvm.predict(X)
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            results = list(executor.map(lambda qsvm: qsvm.predict(X), self._trained_qsvms))
+        results = np.asarray(results)
 
         # Combine predictions as a weighted sum
         preds = (self._weights * results).sum(axis=0)
@@ -677,10 +677,7 @@ class QSVMGroup:
 
         # Set unclassified samples arbitrarily
         if np.any(preds == 0):
-            if self.warn:
-                warnings.warn(
-                    f'{sum(preds == 0)} samples lie on the decision boundary. Arbitrarily assigning class 1.'
-                )
+            warnings.warn(f'{sum(preds == 0)} samples lie on the decision boundary. Arbitrarily assigning class 1.')
             preds[preds == 0] = 1  # Go with class 1 if we don't know
 
         return preds
@@ -721,4 +718,8 @@ if __name__ == '__main__':
     qsvmgroup.fit(x, y)
     print(time.perf_counter() - t)
 
-    print(qsvmgroup.score(x, y))
+    x2 = np.random.rand(1000 * sz, 4)
+
+    t = time.perf_counter()
+    print(qsvmgroup.predict(x2).shape)
+    print(time.perf_counter() - t)
