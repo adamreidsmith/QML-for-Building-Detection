@@ -179,7 +179,6 @@ def optimize_model(
     model_name: str = '',
     verbose: bool = True,
     visualize: bool = True,
-    fit_takes_valid: bool = False,
     model_kw_params: Optional[dict[str, Any]] = None,
     predict_full_dataset: bool = True,
     score_valid: bool = False,
@@ -199,30 +198,28 @@ def optimize_model(
         disable=not verbose,
     ):
         # QSVM Group model is initialized diffrently to the others
-        if model_kw_params is None:
-            clf = model(**params, **kw_params)
+        if model == QSVMGroup:
+            multiplier = params.pop('multiplier')
+            clf = model(params | kw_params, **model_kw_params, multiplier=multiplier)
+            params['multiplier'] = multiplier
         else:
-            clf = model(params | kw_params, **model_kw_params)  # Occurs for QSVM Group model
+            clf = model(**params, **kw_params)
 
         # If we are only using one fold, do not use cross-validation
         if k_folds == 1:
             # The fit method for QBoost takes validation data as well
             (
-                clf.fit(x_train, y_train)
-                if not fit_takes_valid
-                else clf.fit(x_train, y_train, x_valid[: len(x_train)], y_valid[: len(x_train)])
+                clf.fit(x_train, y_train, x_valid[: len(x_train)], y_valid[: len(x_train)])
+                if model == QBoost
+                else clf.fit(x_train, y_train)
             )
             preds = clf.predict(x_valid) if score_valid else clf.predict(x_train)
             acc, f1 = acc_f1(preds, y_valid if score_valid else y_train)
         else:
             # The fit method for QBoost takes validation data as well
-            fit_args = (
-                dict(x_train=x_train, y_train=y_train)
-                if not fit_takes_valid
-                else dict(
-                    x_train=x_train, y_train=y_train, x_valid=x_valid[: len(x_train)], y_valid=y_valid[: len(x_train)]
-                )
-            )
+            fit_args = dict(x_train=x_train, y_train=y_train)
+            if model == QBoost:
+                fit_args |= dict(x_valid=x_valid[: len(x_train)], y_valid=y_valid[: len(x_train)])
             # Fit using cross validation
             acc, f1 = cross_validation(model=clf, k=k_folds, **fit_args, num_workers=num_cv_workers)
 
@@ -246,14 +243,16 @@ def optimize_model(
             print(f'\t{params | kw_params}')
 
     # Define and train the best classifier on the whole training set
-    if model_kw_params is None:
-        best_clf = model(**param_sets[0], **kw_params)
+    if model == QSVMGroup:
+        multiplier = param_sets[0].pop('multiplier')
+        best_clf = model(param_sets[0] | kw_params, **model_kw_params, multiplier=multiplier)
+        param_sets[0]['multiplier'] = multiplier
     else:
-        best_clf = model(param_sets[0] | kw_params, **model_kw_params)
+        best_clf = model(**param_sets[0], **kw_params)
     (
-        best_clf.fit(x_train, y_train)
-        if not fit_takes_valid
-        else best_clf.fit(x_train, y_train, x_valid[: len(x_train)], y_valid[: len(x_train)])
+        best_clf.fit(x_train, y_train, x_valid[: len(x_train)], y_valid[: len(x_train)])
+        if model == QBoost
+        else best_clf.fit(x_train, y_train)
     )
 
     # Predict and print results
@@ -296,7 +295,7 @@ def main():
     num_qsvm_group_workers = 5
     write_data = True
     k_folds = 3
-    num_cv_workers = 3
+    num_cv_workers = 1
 
     bounds = (full_point_cloud.x.min(), full_point_cloud.x.max(), full_point_cloud.y.min(), full_point_cloud.y.max())
 
@@ -361,69 +360,67 @@ def main():
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    svm_search_space = {'C': np.geomspace(0.001, 100, 16), 'gamma': np.geomspace(0.001, 100, 16)}
-    svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
+    # svm_search_space = {'C': np.geomspace(0.001, 100, 16), 'gamma': np.geomspace(0.001, 100, 16)}
+    # svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
 
-    optimize_model(
-        model=SVC,
-        search_space=svm_search_space,
-        kw_params=svm_kw_params,
-        x_train=train_x_normalized,
-        y_train=train_y,
-        x_valid=valid_x_normalized,
-        y_valid=valid_y,
-        x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
-        y_all=point_cloud.classification.to_numpy(),
-        k_folds=k_folds,
-        num_cv_workers=num_cv_workers,
-        point_cloud=point_cloud,
-        bounds=bounds,
-        model_name='SVM',
-        verbose=verbose,
-        visualize=visualize,
-        fit_takes_valid=False,
-        model_kw_params=None,
-        predict_full_dataset=predict_full_dataset,
-        score_valid=False,
-        write_data=write_data,
-    )
+    # optimize_model(
+    #     model=SVC,
+    #     search_space=svm_search_space,
+    #     kw_params=svm_kw_params,
+    #     x_train=train_x_normalized,
+    #     y_train=train_y,
+    #     x_valid=valid_x_normalized,
+    #     y_valid=valid_y,
+    #     x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
+    #     y_all=point_cloud.classification.to_numpy(),
+    #     k_folds=k_folds,
+    #     num_cv_workers=1,
+    #     point_cloud=point_cloud,
+    #     bounds=bounds,
+    #     model_name='SVM',
+    #     verbose=verbose,
+    #     visualize=visualize,
+    #     model_kw_params=None,
+    #     predict_full_dataset=predict_full_dataset,
+    #     score_valid=False,
+    #     write_data=write_data,
+    # )
 
     ###################################################################################################################
     # QSVM ############################################################################################################
     ###################################################################################################################
 
-    qsvm_search_space = {
-        'B': [2],
-        'P': [0, 1, 2],
-        'K': [3, 4, 5, 6],
-        'zeta': [0.0, 0.4, 0.8, 1.2],
-        'gamma': np.geomspace(0.01 * np.sqrt(10), 10, 6),
-    }
-    qsvm_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
+    # qsvm_search_space = {
+    #     'B': [2],
+    #     'P': [0, 1, 2],
+    #     'K': [3, 4, 5, 6],
+    #     'zeta': [0.0, 0.4, 0.8, 1.2],
+    #     'gamma': np.geomspace(0.01 * np.sqrt(10), 10, 6),
+    # }
+    # qsvm_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    optimize_model(
-        model=QSVM,
-        search_space=qsvm_search_space,
-        kw_params=qsvm_kw_params,
-        x_train=train_x,
-        y_train=train_y,
-        x_valid=valid_x,
-        y_valid=valid_y,
-        x_all=point_cloud[features].to_numpy(),
-        y_all=point_cloud.classification.to_numpy(),
-        k_folds=k_folds,
-        num_cv_workers=num_cv_workers,
-        point_cloud=point_cloud,
-        bounds=bounds,
-        model_name='QSVM',
-        verbose=verbose,
-        visualize=visualize,
-        fit_takes_valid=False,
-        model_kw_params=None,
-        predict_full_dataset=predict_full_dataset,
-        score_valid=False,
-        write_data=write_data,
-    )
+    # optimize_model(
+    #     model=QSVM,
+    #     search_space=qsvm_search_space,
+    #     kw_params=qsvm_kw_params,
+    #     x_train=train_x,
+    #     y_train=train_y,
+    #     x_valid=valid_x,
+    #     y_valid=valid_y,
+    #     x_all=point_cloud[features].to_numpy(),
+    #     y_all=point_cloud.classification.to_numpy(),
+    #     k_folds=k_folds,
+    #     num_cv_workers=num_cv_workers,
+    #     point_cloud=point_cloud,
+    #     bounds=bounds,
+    #     model_name='QSVM',
+    #     verbose=verbose,
+    #     visualize=visualize,
+    #     model_kw_params=None,
+    #     predict_full_dataset=predict_full_dataset,
+    #     score_valid=False,
+    #     write_data=write_data,
+    # )
 
     ###################################################################################################################
     # QSVM Group ######################################################################################################
@@ -434,39 +431,39 @@ def main():
     M = 50  # Size of subsets
     balance_classes = False
 
-    model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
-    qsvm_group_search_space = {
-        'B': [2],
-        'P': [0, 1, 2],
-        'K': [3, 4, 5, 6],
-        'zeta': [0.0, 0.4, 0.8, 1.2],
-        'gamma': np.geomspace(0.01 * np.sqrt(10), 10, 6),
-    }
-    qsvm_group_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
+    # model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
+    # qsvm_group_search_space = {
+    #     'B': [2],
+    #     'P': [0, 1, 2],
+    #     'K': [3, 4, 5, 6],
+    #     'zeta': [0.0, 0.4, 0.8, 1.2],
+    #     'gamma': np.geomspace(0.01 * np.sqrt(10), 10, 6),
+    #     'multiplier': [0.5, 1, 2],
+    # }
+    # qsvm_group_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    optimize_model(
-        model=QSVMGroup,
-        search_space=qsvm_group_search_space,
-        kw_params=qsvm_group_kw_params,
-        x_train=train_x,
-        y_train=train_y,
-        x_valid=valid_x,
-        y_valid=valid_y,
-        x_all=point_cloud[features].to_numpy(),
-        y_all=point_cloud.classification.to_numpy(),
-        k_folds=k_folds,
-        num_cv_workers=num_cv_workers,
-        point_cloud=point_cloud,
-        bounds=bounds,
-        model_name='QSVM Group',
-        verbose=verbose,
-        visualize=visualize,
-        fit_takes_valid=False,
-        model_kw_params=model_kw_params,
-        predict_full_dataset=predict_full_dataset,
-        score_valid=False,
-        write_data=write_data,
-    )
+    # optimize_model(
+    #     model=QSVMGroup,
+    #     search_space=qsvm_group_search_space,
+    #     kw_params=qsvm_group_kw_params,
+    #     x_train=train_x,
+    #     y_train=train_y,
+    #     x_valid=valid_x,
+    #     y_valid=valid_y,
+    #     x_all=point_cloud[features].to_numpy(),
+    #     y_all=point_cloud.classification.to_numpy(),
+    #     k_folds=k_folds,
+    #     num_cv_workers=num_cv_workers,
+    #     point_cloud=point_cloud,
+    #     bounds=bounds,
+    #     model_name='QSVM Group',
+    #     verbose=verbose,
+    #     visualize=visualize,
+    #     model_kw_params=model_kw_params,
+    #     predict_full_dataset=predict_full_dataset,
+    #     score_valid=False,
+    #     write_data=write_data,
+    # )
 
     ###################################################################################################################
     # SVM w/ Quantum Kernel ###########################################################################################
@@ -525,7 +522,6 @@ def main():
         model_name='Quantum Kernel SVM',
         verbose=verbose,
         visualize=visualize,
-        fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=predict_full_dataset,
         score_valid=False,
@@ -564,7 +560,6 @@ def main():
         model_name='Quantum Kernel QSVM',
         verbose=verbose,
         visualize=visualize,
-        fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=predict_full_dataset,
         score_valid=False,
@@ -575,39 +570,39 @@ def main():
     # QSVM Group w/ Quantum Kernels ###################################################################################
     ###################################################################################################################
 
-    model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
-    kernel_qsvm_group_search_space = {
-        'B': [2],
-        'P': [0, 1],
-        'K': [3, 4, 5],
-        'zeta': [0.0, 0.4, 0.8, 1.2],
-        'kernel': kernels,
-    }
-    kernel_qsvm_group_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
+    # model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
+    # kernel_qsvm_group_search_space = {
+    #     'B': [2],
+    #     'P': [0, 1],
+    #     'K': [3, 4, 5],
+    #     'zeta': [0.0, 0.4, 0.8, 1.2],
+    #     'kernel': kernels,
+    #     'multiplier': [1.0],
+    # }
+    # kernel_qsvm_group_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    optimize_model(
-        model=QSVMGroup,
-        search_space=kernel_qsvm_group_search_space,
-        kw_params=kernel_qsvm_group_kw_params,
-        x_train=train_x,
-        y_train=train_y,
-        x_valid=valid_x,
-        y_valid=valid_y,
-        x_all=point_cloud[features].to_numpy(),
-        y_all=point_cloud.classification.to_numpy(),
-        k_folds=k_folds,
-        num_cv_workers=num_cv_workers,
-        point_cloud=point_cloud,
-        bounds=bounds,
-        model_name='Quantum Kernel QSVM Group',
-        verbose=verbose,
-        visualize=visualize,
-        fit_takes_valid=False,
-        model_kw_params=model_kw_params,
-        predict_full_dataset=predict_full_dataset,
-        score_valid=False,
-        write_data=write_data,
-    )
+    # optimize_model(
+    #     model=QSVMGroup,
+    #     search_space=kernel_qsvm_group_search_space,
+    #     kw_params=kernel_qsvm_group_kw_params,
+    #     x_train=train_x,
+    #     y_train=train_y,
+    #     x_valid=valid_x,
+    #     y_valid=valid_y,
+    #     x_all=point_cloud[features].to_numpy(),
+    #     y_all=point_cloud.classification.to_numpy(),
+    #     k_folds=k_folds,
+    #     num_cv_workers=num_cv_workers,
+    #     point_cloud=point_cloud,
+    #     bounds=bounds,
+    #     model_name='Quantum Kernel QSVM Group',
+    #     verbose=verbose,
+    #     visualize=visualize,
+    #     model_kw_params=model_kw_params,
+    #     predict_full_dataset=predict_full_dataset,
+    #     score_valid=False,
+    #     write_data=write_data,
+    # )
 
     ###################################################################################################################
     # Weak Classifiers ################################################################################################
@@ -619,7 +614,9 @@ def main():
 
     # Split the training data into `n_weak_classifiers` random subsets of size `samples_per_classifier`.
     # Use a QSVMGroup to accomplish this.
-    qsvm_group = QSVMGroup({}, S=n_weak_classifiers, M=samples_per_classifier, balance_classes=balance_classes)
+    qsvm_group = QSVMGroup(
+        {}, S=n_weak_classifiers, M=samples_per_classifier, balance_classes=balance_classes, multiplier=1.0
+    )
     qsvm_group._define_data_subsets(train_x, train_y)
     train_x_split = qsvm_group._x_subsets
     train_y_split = qsvm_group._y_subsets
@@ -680,7 +677,6 @@ def main():
         model_name='QBoost',
         verbose=verbose,
         visualize=visualize,
-        fit_takes_valid=True,
         model_kw_params=None,
         predict_full_dataset=predict_full_dataset,
         score_valid=False,
@@ -714,7 +710,6 @@ def main():
         model_name='AdaBoost',
         verbose=verbose,
         visualize=visualize,
-        fit_takes_valid=False,
         model_kw_params=None,
         predict_full_dataset=predict_full_dataset,
         score_valid=False,

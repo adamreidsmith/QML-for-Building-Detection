@@ -554,6 +554,7 @@ class QSVMGroup:
         qsvm_params: dict[str, Any],
         S: int,
         M: int,
+        multiplier: float,
         balance_classes: bool,
         num_workers: int = 1,
     ) -> None:
@@ -579,6 +580,7 @@ class QSVMGroup:
         self.M = M
         self.balance_classes = balance_classes
         self.num_workers = num_workers
+        self.multiplier = multiplier
 
         self._x_subsets: list[np.ndarray]
         self._y_subsets: list[np.ndarray]
@@ -649,7 +651,7 @@ class QSVMGroup:
         #     self._trained_qsvms.append(qsvm)
 
         accs = np.asarray(accs)
-        self._weights = softmax(accs).reshape(-1, 1)
+        self._weights = softmax(self.multiplier * accs).reshape(-1, 1)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         '''
