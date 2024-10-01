@@ -1,5 +1,6 @@
 import warnings
 from typing import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -15,7 +16,9 @@ class AdaBoost:
         55(1):119-139, 1997. https://www.sciencedirect.com/science/article/pii/S002200009791504X.
     '''
 
-    def __init__(self, weak_classifiers: list[Callable[[np.ndarray], np.ndarray]], n_estimators: int = 50) -> None:
+    def __init__(
+        self, weak_classifiers: list[Callable[[np.ndarray], np.ndarray]], n_estimators: int = 50, num_workers: int = 1
+    ) -> None:
         '''
         Initialize the AdaBoost classifier.
 
@@ -30,6 +33,7 @@ class AdaBoost:
 
         self.weak_classifiers = weak_classifiers
         self.n_estimators = n_estimators
+        self.num_workers = num_workers
         self.alphas = []
         self.selected_classifiers = []
 
@@ -54,7 +58,7 @@ class AdaBoost:
 
         for _ in range(self.n_estimators):
             # Calculate error for each weak classifier
-            errors = np.array([np.sum(w[y != clf(X)]) for clf in self.weak_classifiers])
+            errors = np.asarray([np.sum(w[y != clf(X)]) for clf in self.weak_classifiers])
 
             # Select the best weak classifier
             best_clf_idx = np.argmin(errors)
@@ -92,7 +96,12 @@ class AdaBoost:
             Predictions of shape (n_samples,)
         '''
 
-        clf_preds = np.array([clf(X) for clf in self.selected_classifiers])
+        if self.num_workers == 1:
+            clf_preds = np.array([clf(X) for clf in self.selected_classifiers])
+        else:
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                clf_preds = np.asarray(list(executor.map(lambda clf: clf(X), self.selected_classifiers)))
+
         preds = np.sign(np.dot(self.alphas, clf_preds))
         if np.any(preds == 0):
             warnings.warn(f'{sum(preds == 0)} samples lie on the decision boundary. Arbitrarily assigning class 1.')

@@ -124,6 +124,7 @@ class QSVM:
         hybrid_time_limit: float = _arg_defaults['hybrid_time_limit'],
         normalize: bool = _arg_defaults['normalize'],
         warn: bool = _arg_defaults['warn'],
+        **_,
     ) -> None:
         f'''
         Parameters
