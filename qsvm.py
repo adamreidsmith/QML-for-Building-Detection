@@ -124,7 +124,7 @@ class QSVM:
         hybrid_time_limit: float = _arg_defaults['hybrid_time_limit'],
         normalize: bool = _arg_defaults['normalize'],
         warn: bool = _arg_defaults['warn'],
-        **_,
+        **_: Any,
     ) -> None:
         f'''
         Parameters
@@ -168,6 +168,8 @@ class QSVM:
         warn : bool
             Warn if samples lie on the decision boundary of the fitted classifier.
             Default is {self._arg_defaults['warn']}.
+        **_ : Any
+            All remaining keyword arguments are ignored.
         '''
 
         self.B = float(B)  # Base of the encoding
