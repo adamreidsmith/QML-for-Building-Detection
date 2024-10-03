@@ -34,8 +34,12 @@ from quantum_kernels import (
 # Set DWave API token
 load_dotenv()
 
+DATASET = 'kits'
+# DATASET = 'downtown'
+# DATASET = 'ptgrey'
+
 WORKING_DIR = Path(__file__).parent
-LOG_DIR = WORKING_DIR / 'logs_downtown'
+LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
 
 # SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 40
 SEED = int(sys.argv[1]) if len(sys.argv) > 1 else np.random.randint(100, 1_000_000)
@@ -45,19 +49,7 @@ def visualize_cloud(
     points: np.ndarray,
     colors: Optional[np.ndarray] = None,
     cmap: str = 'viridis',
-    bounds: Optional[tuple[float, float, float, float]] = None,
 ) -> None:
-    if bounds is not None:
-        minx, maxx, miny, maxy = bounds
-        if minx >= maxx or miny >= maxy:
-            raise ValueError('Invalid bounds passed to `visualize_cloud`')
-
-        indices = np.arange(len(points))
-        indices = indices[
-            (points[:, 0] >= minx) & (points[:, 0] <= maxx) & (points[:, 1] >= miny) & (points[:, 1] <= maxy)
-        ]
-        points = points[indices]
-        colors = colors[indices]
 
     geom = o3d.geometry.PointCloud()
     geom.points = o3d.utility.Vector3dVector(points)
@@ -179,7 +171,6 @@ def optimize_model(
     k_folds: int,
     num_cv_workers: int,
     point_cloud: pd.DataFrame,
-    bounds: tuple[float, float, float, float],
     model_name: str = '',
     verbose: bool = True,
     visualize: bool = True,
@@ -203,7 +194,9 @@ def optimize_model(
     ):
         # QSVM Group model is initialized diffrently to the others
         if model == QSVMGroup:
-            clf = model(params | kw_params, **model_kw_params, multiplier=params['multiplier'])
+            multiplier, SM = params.pop('multiplier'), params.pop('SM')
+            clf = model(params | kw_params, **model_kw_params, multiplier=multiplier, S=SM[0], M=SM[1])
+            params['multiplier'], params['SM'] = multiplier, SM
         else:
             clf = model(**params, **kw_params)
 
@@ -246,7 +239,9 @@ def optimize_model(
 
     # Define and train the best classifier on the whole training set
     if model == QSVMGroup:
-        best_clf = model(param_sets[0] | kw_params, **model_kw_params, multiplier=param_sets[0]['multiplier'])
+        multiplier, SM = param_sets[0].pop('multiplier'), param_sets[0].pop('SM')
+        best_clf = model(param_sets[0] | kw_params, **model_kw_params, multiplier=multiplier, S=SM[0], M=SM[1])
+        param_sets[0]['multiplier'], param_sets[0]['SM'] = multiplier, SM
     else:
         best_clf = model(**param_sets[0], **kw_params)
     (
@@ -270,12 +265,7 @@ def optimize_model(
         print(f'{model_name} full dataset F1:       {full_f1:.3f}')
 
         if visualize:
-            visualize_cloud(
-                point_cloud[['x', 'y', 'z']].to_numpy(),
-                colors=point_cloud_preds,
-                cmap='cool',
-                bounds=bounds,
-            )
+            visualize_cloud(point_cloud[['x', 'y', 'z']].to_numpy(), colors=point_cloud_preds, cmap='cool')
 
     return clf
 
@@ -335,9 +325,12 @@ def main():
         print(f'Using {SEED = }')
         np.random.seed(SEED)
 
-    data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '1m_lidar.csv'
-    # data_file = WORKING_DIR / 'data' / '491000_5458000_downtown' / '1m_lidar.csv'
-    # data_file = WORKING_DIR / 'data' / '483000_5457000_ptgrey2' / '1m_lidar.csv'
+    if DATASET == 'kits':
+        data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '1m_lidar.csv'
+    elif DATASET == 'downtown':
+        data_file = WORKING_DIR / 'data' / '491000_5458000_downtown' / '1m_lidar.csv'
+    elif DATASET == 'ptgrey':
+        data_file = WORKING_DIR / 'data' / '483000_5457000_ptgrey' / '1m_lidar.csv'
     full_point_cloud = pd.read_csv(data_file)
 
     predict_full_dataset = False
@@ -348,22 +341,25 @@ def main():
     k_folds = 3
     num_cv_workers = 3
 
-    bounds = (full_point_cloud.x.min(), full_point_cloud.x.max(), full_point_cloud.y.min(), full_point_cloud.y.max())
-
     # Map building points to 1 and all others to 0
     full_point_cloud.classification = full_point_cloud.classification.map(lambda x: 1 if x == 6 else -1)
-    # visualize_cloud(full_point_cloud[['x', 'y', 'z']].to_numpy(), colors=full_point_cloud.classification.to_numpy())
+    # visualize_cloud(
+    #     # np.hstack((full_point_cloud[['x', 'y']].to_numpy(), np.zeros((len(full_point_cloud), 1)))),
+    #     full_point_cloud[['x', 'y', 'z']].to_numpy(),
+    #     colors=full_point_cloud.z.to_numpy(),
+    #     cmap='viridis',
+    # )
 
-    downsample_factor = 0.25 if 'kits' in str(data_file) else 1.0
-    print(downsample_factor)
-    if downsample_factor < 1.0:
-        if verbose:
-            print(f'Downsampling point cloud by factor {downsample_factor}...')
-        point_cloud = downsample_point_cloud(
-            full_point_cloud, downsample_factor, keep_max=('ptgrey' in str(data_file))
-        )
-    else:
-        point_cloud = full_point_cloud
+    # downsample_factor = 0.25 if 'kits' in str(data_file) else 1.0
+    # if downsample_factor < 1.0:
+    #     if verbose:
+    #         print(f'Downsampling point cloud by factor {downsample_factor}...')
+    #     point_cloud = downsample_point_cloud(
+    #         full_point_cloud, downsample_factor, keep_max=('ptgrey' in str(data_file))
+    #     )
+    # else:
+    #     point_cloud = full_point_cloud
+    point_cloud = full_point_cloud
     if verbose:
         value_counts = point_cloud.classification.value_counts()
         print(
@@ -377,21 +373,28 @@ def main():
     n_train_samples = 1000
     n_valid_samples = 50000
 
-    indices = np.arange(len(point_cloud))
-    np.random.shuffle(indices)
-    train_indices = indices[:n_train_samples]
-    valid_indices = indices[-n_valid_samples:]
+    if DATASET == 'ptgrey':
+        pc = downsample_point_cloud(point_cloud, factor=0.25, keep_max=True)
+    else:
+        pc = point_cloud
+    train_y = np.empty(0)
+    # Ensure we have sufficiently many building points in the train set
+    while len(train_y[train_y == 1]) < n_train_samples / 20:
+        indices = np.arange(len(pc))
+        np.random.shuffle(indices)
+        train_indices = indices[:n_train_samples]
+        valid_indices = indices[-n_valid_samples:]
 
-    features = ['z', 'normal_variation', 'height_variation', 'intensity']
+        features = ['z', 'normal_variation', 'height_variation', 'intensity']
 
-    train_x = point_cloud[features].iloc[train_indices].to_numpy()
-    valid_x = point_cloud[features].iloc[valid_indices].to_numpy()
-    train_y = point_cloud.classification.iloc[train_indices].to_numpy()
-    valid_y = point_cloud.classification.iloc[valid_indices].to_numpy()
+        train_x = pc[features].iloc[train_indices].to_numpy()
+        valid_x = pc[features].iloc[valid_indices].to_numpy()
+        train_y = pc.classification.iloc[train_indices].to_numpy()
+        valid_y = pc.classification.iloc[valid_indices].to_numpy()
 
-    train_mean, train_std = np.mean(train_x, axis=0), np.std(train_x, axis=0)
-    train_x_normalized = (train_x - train_mean) / train_std
-    valid_x_normalized = (valid_x - train_mean) / train_std
+        train_mean, train_std = np.mean(train_x, axis=0), np.std(train_x, axis=0)
+        train_x_normalized = (train_x - train_mean) / train_std
+        valid_x_normalized = (valid_x - train_mean) / train_std
 
     if verbose:
         print(
@@ -409,10 +412,7 @@ def main():
 
     if visualize:
         visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(),
-            colors=point_cloud.classification.to_numpy(),
-            cmap='cool',
-            bounds=bounds,
+            point_cloud[['x', 'y', 'z']].to_numpy(), colors=point_cloud.classification.to_numpy(), cmap='cool'
         )
 
     ###################################################################################################################
@@ -435,7 +435,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=1,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='SVM',
         verbose=verbose,
         visualize=visualize,
@@ -471,7 +470,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=num_cv_workers,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='QSVM',
         verbose=verbose,
         visualize=visualize,
@@ -486,11 +484,10 @@ def main():
     ###################################################################################################################
 
     # QSVM Group hyperparameters
-    S = 20  # Number of classifiers
-    M = 50  # Size of subsets
+    SM = [(25, 40), (40, 25), (40, 40)]  # (Number of classifiers, Size of subsets)
     balance_classes = True
 
-    model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
+    model_kw_params = {'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
     qsvm_group_search_space = {
         'B': [2],
         'P': [0, 1],
@@ -498,14 +495,13 @@ def main():
         'zeta': [0.0, 0.4, 0.8, 1.2],
         'gamma': np.geomspace(0.01 * np.sqrt(10), 10, 6),
         'multiplier': np.geomspace(0.1, 10, 5),
+        'SM': SM,
     }
     qsvm_group_kw_params = {
         'kernel': 'rbf',
         'sampler': 'steepest_descent',
         'num_reads': 100,
         'normalize': True,
-        'S': S,
-        'M': M,
         'balance_classes': balance_classes,
     }
 
@@ -522,7 +518,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=num_cv_workers,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='QSVM Group',
         verbose=verbose,
         visualize=visualize,
@@ -568,13 +563,13 @@ def main():
 
     kernels = []
     for kernel in uninitialized_kernels:
-        kernels.append(Kernel(kernel[0](**kernel[1]), f'{kernel[0].__name__}({kernel[1]})'))
-        # kernels.append(
-        #     Kernel(
-        #         kernel[0](**kernel[1]),
-        #         f'{kernel[0].__name__}({", ".join(k + "=" + str(v) for k, v in kernel[1].items())})',
-        #     )
-        # )
+        # kernels.append(Kernel(kernel[0](**kernel[1]), f'{kernel[0].__name__}({kernel[1]})'))
+        kernels.append(
+            Kernel(
+                kernel[0](**kernel[1]),
+                f'{kernel[0].__name__}({", ".join(k + "=" + str(v) for k, v in kernel[1].items())})',
+            )
+        )
 
     kernel_svm_search_space = {'C': np.geomspace(0.01, 100, 13), 'kernel': kernels}
     kernel_svm_kw_params = {'class_weight': 'balanced'}
@@ -592,7 +587,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=num_cv_workers,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='Quantum Kernel SVM',
         verbose=verbose,
         visualize=visualize,
@@ -630,7 +624,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=num_cv_workers,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='Quantum Kernel QSVM',
         verbose=verbose,
         visualize=visualize,
@@ -644,7 +637,7 @@ def main():
     # QSVM Group w/ Quantum Kernels ###################################################################################
     ###################################################################################################################
 
-    # model_kw_params = {'S': S, 'M': M, 'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
+    # model_kw_params = {'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
     # kernel_qsvm_group_search_space = {
     #     'B': [2],
     #     'P': [0, 1],
@@ -652,13 +645,12 @@ def main():
     #     'zeta': [0.0, 0.4, 0.8, 1.2],
     #     'kernel': kernels,
     #     'multiplier': [1.0],
+    #     'SM': SM,
     # }
     # kernel_qsvm_group_kw_params = {
     #     'sampler': 'steepest_descent',
     #     'num_reads': 100,
     #     'normalize': True,
-    #     'S': S,
-    #     'M': M,
     #     'balance_classes': balance_classes,
     # }
 
@@ -675,7 +667,6 @@ def main():
     #     k_folds=k_folds,
     #     num_cv_workers=num_cv_workers,
     #     point_cloud=point_cloud,
-    #     bounds=bounds,
     #     model_name='Quantum Kernel QSVM Group',
     #     verbose=verbose,
     #     visualize=visualize,
@@ -711,7 +702,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=num_cv_workers,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='QBoost',
         verbose=verbose,
         visualize=visualize,
@@ -744,7 +734,6 @@ def main():
         k_folds=k_folds,
         num_cv_workers=1,
         point_cloud=point_cloud,
-        bounds=bounds,
         model_name='AdaBoost',
         verbose=verbose,
         visualize=visualize,
