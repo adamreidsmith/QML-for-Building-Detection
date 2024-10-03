@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import tqdm
 from scipy.interpolate import griddata
 from scipy.spatial import KDTree
+from scipy.stats import iqr
 
 
 class GriddataPartial:
@@ -42,7 +43,7 @@ class GriddataPartial:
 
 
 class HeightVariation:
-    def __init__(self, point_data_normalized_height: np.ndarray, kdtree: KDTree, r: float) -> None:
+    def __init__(self, point_data_normalized_height: np.ndarray, kdtree: KDTree, r: float, method: str) -> None:
         '''
         This class computes the height variation of point data and facilitates
         parallelization with multiprocessing.Pool. Height variation is the absolute difference
@@ -57,11 +58,25 @@ class HeightVariation:
             This facilitates fast ball point queries.
         r : float
             The radius of the ball point queries.
+        method : str
+            The height variation method.
+            'absolute': absolute difference between min and max values.
+            'mad': median absolute deviation. median(|z_i - median(z)|)
+            'iqr': interquartile range.
         '''
 
         self.point_data = point_data_normalized_height
         self.kdtree = kdtree
         self.r = r
+
+        if method == 'absolute':
+            self.method_func = self.absolute
+        elif method == 'mad':
+            self.method_func = self.mad
+        elif method == 'iqr':
+            self.method_func = iqr
+        else:
+            raise ValueError(f'Invalid method: \'{method}\'')
 
     def __call__(self, index_range: tuple[int, int]) -> np.ndarray:
         '''
@@ -88,8 +103,16 @@ class HeightVariation:
             if len(indices) == 1:
                 continue
             points_in_disk_z = self.point_data[indices][:, 2]
-            hv[i] = points_in_disk_z.max() - points_in_disk_z.min()
+            hv[i] = self.method_func(points_in_disk_z)
         return hv
+
+    @staticmethod
+    def absolute(x):
+        return x.max() - x.min()
+
+    @staticmethod
+    def mad(x):
+        return np.median(np.abs(x - np.median(x)))
 
 
 class NormalVariation:
