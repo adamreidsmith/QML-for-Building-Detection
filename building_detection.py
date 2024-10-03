@@ -388,7 +388,7 @@ def main():
         train_indices = indices[:n_train_samples]
         valid_indices = indices[-n_valid_samples:]
 
-        features = ['z', 'normal_variation', 'height_variation', 'intensity']
+        features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
 
         train_x = pc[features].iloc[train_indices].to_numpy()
         valid_x = pc[features].iloc[valid_indices].to_numpy()
