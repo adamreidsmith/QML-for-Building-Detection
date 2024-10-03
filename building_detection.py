@@ -371,7 +371,7 @@ def main():
 
     # Choose a random subset of points as a train set
     n_train_samples = 1000
-    n_valid_samples = 50000
+    n_valid_samples = 100_000
 
     if DATASET == 'ptgrey':
         pc = downsample_point_cloud(point_cloud, factor=0.25, keep_max=True)
