@@ -34,15 +34,18 @@ from quantum_kernels import (
 # Set DWave API token
 load_dotenv()
 
-DATASET = 'kits'
+# DATASET = 'kits'
 # DATASET = 'downtown'
 # DATASET = 'ptgrey'
+DATASET = sys.argv[1]
+assert DATASET in ('kits', 'downtown', 'ptgrey')
 
 WORKING_DIR = Path(__file__).parent
 LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
 
 # SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 40
-SEED = int(sys.argv[1]) if len(sys.argv) > 1 else np.random.randint(100, 1_000_000)
+# SEED = int(sys.argv[1]) if len(sys.argv) > 1 else np.random.randint(100, 1_000_000)
+SEED = np.random.randint(100, 1_000_000)
 
 
 def visualize_cloud(
