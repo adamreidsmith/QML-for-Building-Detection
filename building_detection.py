@@ -519,7 +519,6 @@ def main():
         'sampler': 'steepest_descent',
         'num_reads': 100,
         'normalize': True,
-        'balance_classes': balance_classes,
     }
 
     optimize_model(
