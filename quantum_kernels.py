@@ -1,8 +1,8 @@
+import warnings
 from typing import Optional
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from itertools import combinations, chain
-import warnings
 
 import numpy as np
 from qiskit import QuantumCircuit

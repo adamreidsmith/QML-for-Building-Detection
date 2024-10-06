@@ -58,7 +58,8 @@ class AdaBoost:
 
         for _ in range(self.n_estimators):
             # Calculate error for each weak classifier
-            errors = np.asarray([np.sum(w[y != clf(X)]) for clf in self.weak_classifiers])
+            weak_clf_preds = [clf(X) for clf in self.weak_classifiers]
+            errors = np.asarray([np.sum(w[y != preds]) for preds in weak_clf_preds])
 
             # Select the best weak classifier
             best_clf_idx = np.argmin(errors)
@@ -71,7 +72,7 @@ class AdaBoost:
             alpha = 0.5 * np.log((1 - error) / (error + 1e-10))
 
             # Update sample weights
-            predictions = best_clf(X)
+            predictions = weak_clf_preds[best_clf_idx]
             w *= np.exp(-alpha * y * predictions)
             w /= w.sum()  # Normalize weights
 
@@ -102,15 +103,12 @@ class AdaBoost:
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
                 clf_preds = np.asarray(list(executor.map(lambda clf: clf(X), self.selected_classifiers)))
 
-        preds = np.sign(np.dot(self.alphas, clf_preds))
-        if np.any(preds == 0):
-            warnings.warn(f'{sum(preds == 0)} samples lie on the decision boundary. Arbitrarily assigning class 1.')
-            preds[preds == 0] = 1  # Go with class 1 if we don't know
+        preds = np.where(np.dot(self.alphas, clf_preds) > 0, 1, -1)
         return preds
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
         '''
-        Compute the accuracy of the GBM on inputs X against targets y.
+        Compute the accuracy of the AdaBoost classifier on inputs X against targets y.
 
         Parameters
         ----------
@@ -122,7 +120,7 @@ class AdaBoost:
         Returns
         -------
         float
-            The accuracy of the GBM.
+            The accuracy of the AdaBoost Classifier.
         '''
 
         preds = self.predict(X)
