@@ -1,6 +1,7 @@
-import warnings
+import os
 import time
 import numbers
+import warnings
 from typing import Optional, Any
 from collections.abc import Callable
 from functools import partial
@@ -109,6 +110,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         'hybrid_time_limit': [Interval(numbers.Real, 0.0, None, closed='neither')],  # positive float
         'normalize': ['boolean'],  # boolean
         'multi_class_strategy': [Options(str, {'ovo', 'ovr'})],  # valid string options
+        'dwave_api_token': [str, None],
     }
 
     def __init__(
@@ -126,6 +128,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         hybrid_time_limit: float = 3,
         normalize: bool = True,
         multi_class_strategy: str = 'ovo',
+        dwave_api_token: Optional[str] = None,
     ) -> None:
         '''
         Parameters
@@ -169,6 +172,11 @@ class QSVM(ClassifierMixin, BaseEstimator):
         multi_class_strategy : str
             The strategy to use if targets have more than two classes. One of 'ovo' for one-vs-one or 'ovr for
             one-vs-rest. Default is 'ovo'.
+        dwave_api_token : str | None
+            An API token for a D-Wave Leap account. This is necessary to run annealing on quantum hardware (sampler is
+            'hybrid' or 'qa'). In this case, the environment variable DWAVE_API_TOKEN is set to the provided token. It
+            is not necessary if quantum computation is being simulated (sampler is 'simulate', 'tabu', or
+            'steepest_descent'). Default is None.
         '''
 
         self.B = B  # Base of the encoding
@@ -190,6 +198,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         # Other parameters
         self.normalize = normalize
         self.multi_class_strategy = multi_class_strategy
+        self.dwave_api_token = dwave_api_token
 
     def _define_kernel(self) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
         '''
@@ -236,7 +245,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         # Check that targets are binary or multiclass
         y_type = type_of_target(y)
         if y_type not in ['binary', 'multiclass']:
-            raise ValueError('y must be a 1D array of classes. Classes can be represetned by integers or strings.')
+            raise ValueError('y must be a 1D array of classes. Classes can be represented by integers or strings.')
         self.is_multi_class_ = y_type == 'multiclass'
 
         # Required to be set before multiclass output is handled
@@ -251,6 +260,9 @@ class QSVM(ClassifierMixin, BaseEstimator):
                 raise ValueError(f'Unknown multi_class_strategy: {self.multi_class_strategy}')
             self.multi_class_model_.fit(X, y)  # Fit the multi-class model
             return self
+
+        if self.sampler in ['hybrid', 'qa'] and self.dwave_api_token is not None:
+            os.environ['DWAVE_API_TOKEN'] = self.dwave_api_token
 
         # Binary classification
         self.B_ = float(self.B)  # B must be a float for array exponentiation
@@ -378,7 +390,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
     def _run_pure_sampler(self) -> dict[int, int]:
         '''
-        Run a purely quantum or classical sampling method on self.qubo.
+        Run a purely quantum or classical sampling method on self.qubo_.
         '''
 
         if self.sampler == 'simulate':
@@ -399,7 +411,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
     def _run_hybrid_sampler(self) -> dict[int, int]:
         '''
-        Run the Leap hybrid sampler on self.qubo.
+        Run the Leap hybrid sampler on self.qubo_.
         '''
 
         if self._hybrid_sampler is None:
