@@ -5,7 +5,7 @@ import numpy as np
 from scipy.special import softmax
 
 from qsvm import QSVM
-
+from utils import confusion_matrix, matthews_corrcoef, accuracy
 
 class QSVMGroup:
     def __init__(
@@ -91,26 +91,21 @@ class QSVMGroup:
             x_subset, y_subset = subsets
             qsvm = QSVM(**self.qsvm_params)
             qsvm.fit(x_subset, y_subset)
-            acc = qsvm.score(X, y)
-            return qsvm, acc
+            preds = qsvm.predict(X)
+            cm = confusion_matrix(preds, y)
+            # acc = accuracy(cm)
+            mcc = matthews_corrcoef(cm)
+            return qsvm, mcc
 
         # Use ThreadPoolExecutor to parallelize the process
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             results = list(executor.map(train_and_score, zip(self._x_subsets, self._y_subsets)))
 
         # Unpack the results into _trained_qsvms and accuracies
-        self._trained_qsvms, accs = zip(*results)
+        self._trained_qsvms, mccs = zip(*results)
 
-        # self._trained_qsvms = []
-        # accs = []
-        # for x_subset, y_subset in zip(self._x_subsets, self._y_subsets):
-        #     qsvm = QSVM(**self.qsvm_params)
-        #     qsvm.fit(x_subset, y_subset)
-        #     accs.append(qsvm.score(X, y))
-        #     self._trained_qsvms.append(qsvm)
-
-        accs = np.asarray(accs)
-        self._weights = softmax(self.multiplier * accs).reshape(-1, 1)
+        mccs = np.asarray(mccs)
+        self._weights = softmax(self.multiplier * mccs).reshape(-1, 1)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         '''

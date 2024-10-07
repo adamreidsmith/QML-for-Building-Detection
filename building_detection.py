@@ -10,11 +10,8 @@ from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
-import open3d as o3d
-import matplotlib.pyplot as plt
 from sklearn.svm import SVC
 from sklearn.model_selection import KFold
-from sklearn.metrics import f1_score
 from tqdm import tqdm
 from dotenv import load_dotenv
 
@@ -31,6 +28,7 @@ from quantum_kernels import (
     qaoa_inspired_feature_map,
     data_reuploading_feature_map,
 )
+from utils import accuracy, visualize_cloud, confusion_matrix, matthews_corrcoef, f1_score
 
 
 # Set DWave API token
@@ -47,27 +45,6 @@ LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
 
 # SEED = int(sys.argv[1]) if len(sys.argv) > 1 else np.random.randint(100, 1_000_000)
 SEED = np.random.randint(100, 1_000_000)
-
-
-def visualize_cloud(
-    points: np.ndarray,
-    colors: Optional[np.ndarray] = None,
-    cmap: str = 'viridis',
-) -> None:
-
-    geom = o3d.geometry.PointCloud()
-    geom.points = o3d.utility.Vector3dVector(points)
-
-    # Use a colormap from Matplotlib
-    cmap = plt.get_cmap(cmap)
-
-    # Map integers to colors using the colormap
-    colour_var = np.asarray(colors) if colors is not None else points[:, 2]
-    colour_var_norm = (colour_var - colour_var.min()) / (colour_var.max() - colour_var.min())
-    colors = cmap(colour_var_norm)[:, :3]  # [:3] to exclude the alpha channel
-    geom.colors = o3d.utility.Vector3dVector(colors)
-
-    o3d.visualization.draw_geometries([geom])
 
 
 def downsample_point_cloud(point_cloud: pd.DataFrame, factor: float, keep_max: bool) -> pd.DataFrame:
@@ -90,12 +67,6 @@ def downsample_point_cloud(point_cloud: pd.DataFrame, factor: float, keep_max: b
     return point_cloud
 
 
-def acc_f1(predictions: np.ndarray, labels: np.ndarray) -> float:
-    acc = np.sum(predictions == labels) / labels.shape[0]
-    f1 = f1_score(y_true=labels, y_pred=predictions, pos_label=1, average='binary', zero_division=0.0)
-    return acc, f1
-
-
 def cross_validation_helper(
     index_tuple: tuple[np.ndarray, np.ndarray],
     model: Any,
@@ -103,7 +74,7 @@ def cross_validation_helper(
     y_train: np.ndarray,
     x_valid: Optional[np.ndarray] = None,
     y_valid: Optional[np.ndarray] = None,
-):
+) -> np.ndarray[int]:
     '''
     Helper function to allow for parallelization of cross validation.
     '''
@@ -119,7 +90,7 @@ def cross_validation_helper(
     else:
         clf.fit(x_train_fold, y_train_fold)
 
-    return acc_f1(clf.predict(x_test_fold), y_test_fold)
+    return confusion_matrix(clf.predict(x_test_fold), y_test_fold)
 
 
 def cross_validation(
@@ -131,7 +102,7 @@ def cross_validation(
     y_valid: Optional[np.ndarray] = None,
     seed: Optional[int] = None,
     num_workers: int = 5,
-) -> float:
+) -> np.ndarray[int]:
     kf = KFold(n_splits=k, shuffle=True, random_state=seed)
 
     if num_workers > 1:
@@ -139,13 +110,12 @@ def cross_validation(
             cross_validation_helper, model=model, x_train=x_train, y_train=y_train, x_valid=x_valid, y_valid=y_valid
         )
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            accs_and_f1s = list(executor.map(cross_validation_helper_partial, kf.split(x_train)))
-        accs, f1s = list(zip(*accs_and_f1s))
+            cms = list(executor.map(cross_validation_helper_partial, kf.split(x_train)))
 
     else:
-        accs, f1s = [], []
+        cms = []
         for index_tuple in kf.split(x_train):
-            acc, f1 = cross_validation_helper(
+            cm = cross_validation_helper(
                 index_tuple=index_tuple,
                 model=model,
                 x_train=x_train,
@@ -153,13 +123,10 @@ def cross_validation(
                 x_valid=x_valid,
                 y_valid=y_valid,
             )
-            accs.append(acc)
-            f1s.append(f1)
+            cms.append(cm)
 
-    avg_acc = np.mean(accs)
-    avg_f1 = np.mean(f1s)
-
-    return avg_acc, avg_f1
+    aggregate_cm = sum(cms)
+    return aggregate_cm
 
 
 def optimize_model(
@@ -188,7 +155,7 @@ def optimize_model(
 
     # Divide the search space into param dictionaries we can pass to the model
     param_sets = (dict(zip(search_space.keys(), values)) for values in product(*search_space.values()))
-    best_clfs = (-1.0, [None])  # (accuracy, [params, ...])
+    best_clfs = (-float('inf'), [None])  # (mcc, [params, ...])
     # Hyperparameter optimization loop
     for params in tqdm(
         param_sets,
@@ -213,19 +180,21 @@ def optimize_model(
                 else clf.fit(x_train, y_train)
             )
             preds = clf.predict(x_valid) if score_valid else clf.predict(x_train)
-            acc, f1 = acc_f1(preds, y_valid if score_valid else y_train)
+            cm = confusion_matrix(preds, y_valid if score_valid else y_train)
         else:
             # The fit method for QBoost takes validation data as well
             fit_args = dict(x_train=x_train, y_train=y_train)
             if model == QBoost:
                 fit_args |= dict(x_valid=x_valid[: len(x_train)], y_valid=y_valid[: len(x_train)])
             # Fit using cross validation
-            acc, f1 = cross_validation(model=clf, k=k_folds, **fit_args, num_workers=num_cv_workers)
+            cm = cross_validation(model=clf, k=k_folds, **fit_args, num_workers=num_cv_workers)
+
+        mcc = matthews_corrcoef(cm)
 
         # Update the best known model
-        if acc > best_clfs[0]:
-            best_clfs = (acc, [params])
-        elif acc == best_clfs[0]:
+        if mcc > best_clfs[0]:
+            best_clfs = (mcc, [params])
+        elif mcc == best_clfs[0]:
             best_clfs[1].append(params)
 
         # Write results to a file
@@ -238,13 +207,13 @@ def optimize_model(
             else:
                 params_to_print = params
             with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
-                print(f'{acc:.6f}:{f1:.4f}:{params_to_print | kw_params}', file=f)
+                print(f'{mcc:.4f};{";".join(map(str, cm))};{params_to_print | kw_params}', file=f)
 
     # The best accuracy, and a list of the parameter sets that provide that accuracy
-    acc, param_sets = best_clfs
+    mcc, param_sets = best_clfs
 
     if verbose:
-        print(f'{model_name} best params with training accuracy {acc:.2%}:')
+        print(f'{model_name} best params with training MCC {mcc:.4f}:')
         for params in param_sets:
             print(f'\t{params | kw_params}')
 
@@ -262,18 +231,21 @@ def optimize_model(
     )
 
     # Predict and print results
-    train_acc, train_f1 = acc_f1(best_clf.predict(x_train), y_train)
-    print(f'{model_name} training accuracy: {train_acc:.2%}')
-    print(f'{model_name} training F1:       {train_f1:.3f}')
-    valid_acc, valid_f1 = acc_f1(best_clf.predict(x_valid), y_valid)
-    print(f'{model_name} validation accuracy: {valid_acc:.2%}')
-    print(f'{model_name} validation F1:       {valid_f1:.3f}')
+    train_cm = confusion_matrix(best_clf.predict(x_train), y_train)
+    print(f'{model_name} training MCC: {matthews_corrcoef(train_cm):.4f}')
+    print(f'{model_name} training F1:  {f1_score(train_cm):.4f}')
+    print(f'{model_name} training acc: {accuracy(train_cm):.4f}')
+    valid_cm = confusion_matrix(best_clf.predict(x_valid), y_valid)
+    print(f'{model_name} validation MCC: {matthews_corrcoef(valid_cm):.4f}')
+    print(f'{model_name} validation F1:  {f1_score(valid_cm):.4f}')
+    print(f'{model_name} validation acc: {accuracy(valid_cm):.4f}')
 
     if predict_full_dataset:
         point_cloud_preds = best_clf.predict(x_all)
-        full_acc, full_f1 = acc_f1(point_cloud_preds, y_all)
-        print(f'{model_name} full dataset accuracy: {full_acc:.2%}')
-        print(f'{model_name} full dataset F1:       {full_f1:.3f}')
+        full_cm = confusion_matrix(point_cloud_preds, y_all)
+        print(f'{model_name} full dataset MCC: {matthews_corrcoef(full_cm):.2%}')
+        print(f'{model_name} full dataset F1:  {f1_score(full_cm):.3f}')
+        print(f'{model_name} full dataset acc: {accuracy(full_cm):.3f}')
 
         if visualize:
             visualize_cloud(point_cloud[['x', 'y', 'z']].to_numpy(), colors=point_cloud_preds, cmap='cool')
@@ -320,15 +292,16 @@ def train_weak_classifiers(
         ]
         weak_clfs = []
         for tx, ty in tqdm(zip(train_x_split, train_y_split), desc='Optimizing Weak QSVMs', total=S):
-            best_weak_qsvm = (None, None, 0.0)
+            best_weak_qsvm = (None, None, -float('inf'))  # (qsvm, params, mcc)
             # Hyperparameter optimization loop
             for params in param_sets:
                 qsvm = QSVM(**params, **weak_clf_kw_params)
                 qsvm.fit(tx, ty)
-                acc = qsvm.score(tx, ty)
-                # acc = qsvm.score(train_x, train_y)
-                if acc > best_weak_qsvm[2]:
-                    best_weak_qsvm = (qsvm, params, acc)
+                preds = qsvm.predict(tx)
+                cm = confusion_matrix(preds, ty)
+                mcc = matthews_corrcoef(cm)
+                if mcc > best_weak_qsvm[2]:
+                    best_weak_qsvm = (qsvm, params, mcc)
 
             qsvm, params, _ = best_weak_qsvm
             weak_clfs.append(qsvm)
@@ -436,69 +409,69 @@ def main():
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    # svm_search_space = {'C': np.geomspace(0.001, 100, 16), 'gamma': np.geomspace(0.001, 100, 16)}
-    # svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
+    svm_search_space = {'C': np.geomspace(0.001, 100, 16), 'gamma': np.geomspace(0.001, 100, 16)}
+    svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
 
-    # optimize_model(
-    #     model=SVC,
-    #     search_space=svm_search_space,
-    #     kw_params=svm_kw_params,
-    #     x_train=train_x_normalized,
-    #     y_train=train_y,
-    #     x_valid=valid_x_normalized,
-    #     y_valid=valid_y,
-    #     x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
-    #     y_all=point_cloud.classification.to_numpy(),
-    #     k_folds=k_folds,
-    #     num_cv_workers=1,
-    #     point_cloud=point_cloud,
-    #     model_name='SVM',
-    #     verbose=verbose,
-    #     visualize=visualize,
-    #     model_kw_params=None,
-    #     predict_full_dataset=predict_full_dataset,
-    #     score_valid=False,
-    #     write_data=write_data,
-    # )
+    optimize_model(
+        model=SVC,
+        search_space=svm_search_space,
+        kw_params=svm_kw_params,
+        x_train=train_x_normalized,
+        y_train=train_y,
+        x_valid=valid_x_normalized,
+        y_valid=valid_y,
+        x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
+        y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
+        num_cv_workers=1,
+        point_cloud=point_cloud,
+        model_name='SVM',
+        verbose=verbose,
+        visualize=visualize,
+        model_kw_params=None,
+        predict_full_dataset=predict_full_dataset,
+        score_valid=False,
+        write_data=write_data,
+    )
 
-    # ###################################################################################################################
-    # # QSVM ############################################################################################################
-    # ###################################################################################################################
+    ###################################################################################################################
+    # QSVM ############################################################################################################
+    ###################################################################################################################
 
-    # qsvm_search_space = {
-    #     'B': [2],
-    #     'P': [0, 1, 2],
-    #     'K': [3, 4, 5],
-    #     'zeta': [0.0, 0.4, 0.8, 1.2],
-    #     'gamma': np.geomspace(0.1, 1, 5),
-    # }
-    # qsvm_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
+    qsvm_search_space = {
+        'B': [2],
+        'P': [0, 1, 2],
+        'K': [3, 4, 5],
+        'zeta': [0.0, 0.4, 0.8, 1.2],
+        'gamma': np.geomspace(0.1, 1, 5),
+    }
+    qsvm_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    # optimize_model(
-    #     model=QSVM,
-    #     search_space=qsvm_search_space,
-    #     kw_params=qsvm_kw_params,
-    #     x_train=train_x,
-    #     y_train=train_y,
-    #     x_valid=valid_x,
-    #     y_valid=valid_y,
-    #     x_all=point_cloud[features].to_numpy(),
-    #     y_all=point_cloud.classification.to_numpy(),
-    #     k_folds=k_folds,
-    #     num_cv_workers=num_cv_workers,
-    #     point_cloud=point_cloud,
-    #     model_name='QSVM',
-    #     verbose=verbose,
-    #     visualize=visualize,
-    #     model_kw_params=None,
-    #     predict_full_dataset=predict_full_dataset,
-    #     score_valid=False,
-    #     write_data=write_data,
-    # )
+    optimize_model(
+        model=QSVM,
+        search_space=qsvm_search_space,
+        kw_params=qsvm_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
+        num_cv_workers=num_cv_workers,
+        point_cloud=point_cloud,
+        model_name='QSVM',
+        verbose=verbose,
+        visualize=visualize,
+        model_kw_params=None,
+        predict_full_dataset=predict_full_dataset,
+        score_valid=False,
+        write_data=write_data,
+    )
 
-    # ###################################################################################################################
-    # # QSVM Group ######################################################################################################
-    # ###################################################################################################################
+    ###################################################################################################################
+    # QSVM Group ######################################################################################################
+    ###################################################################################################################
 
     # QSVM Group hyperparameters
     SM = [(20, 50), (50, 20), (40, 40)]  # (Number of classifiers, Size of subsets)
@@ -547,111 +520,111 @@ def main():
     # SVM w/ Quantum Kernel ###########################################################################################
     ###################################################################################################################
 
-    # n_features = 4
+    n_features = 4
 
-    # if verbose:
-    #     print('Defining quantum kernels...')
-    # uninitialized_kernels = []
-    # for reps in [1]:
-    #     for entanglement in ['linear', 'pairwise']:
-    #         for single_pauli in 'XYZ':
-    #             for double_pauli in ['XX', 'YY', 'ZZ']:
-    #                 uninitialized_kernels.append(
-    #                     (
-    #                         pauli_feature_map,
-    #                         dict(
-    #                             num_features=n_features,
-    #                             paulis=[single_pauli, double_pauli],
-    #                             reps=reps,
-    #                             entanglement=entanglement,
-    #                         ),
-    #                     )
-    #                 )
-    #     for entanglement in ['full', 'linear']:
-    #         uninitialized_kernels += [
-    #             (iqp_feature_map, dict(num_features=n_features, reps=reps, entanglement=entanglement)),
-    #             (data_reuploading_feature_map, dict(num_features=n_features, reps=reps, entanglement=entanglement)),
-    #         ]
-    #     uninitialized_kernels += [
-    #         (polynomial_feature_map, dict(num_features=n_features, qubits_per_feature=reps)),
-    #         (qaoa_inspired_feature_map, dict(num_features=n_features, reps=reps)),
-    #     ]
+    if verbose:
+        print('Defining quantum kernels...')
+    uninitialized_kernels = []
+    for reps in [1]:
+        for entanglement in ['linear', 'pairwise']:
+            for single_pauli in 'XYZ':
+                for double_pauli in ['XX', 'YY', 'ZZ']:
+                    uninitialized_kernels.append(
+                        (
+                            pauli_feature_map,
+                            dict(
+                                num_features=n_features,
+                                paulis=[single_pauli, double_pauli],
+                                reps=reps,
+                                entanglement=entanglement,
+                            ),
+                        )
+                    )
+        for entanglement in ['full', 'linear']:
+            uninitialized_kernels += [
+                (iqp_feature_map, dict(num_features=n_features, reps=reps, entanglement=entanglement)),
+                (data_reuploading_feature_map, dict(num_features=n_features, reps=reps, entanglement=entanglement)),
+            ]
+        uninitialized_kernels += [
+            (polynomial_feature_map, dict(num_features=n_features, qubits_per_feature=reps)),
+            (qaoa_inspired_feature_map, dict(num_features=n_features, reps=reps)),
+        ]
 
-    # kernels = []
-    # for kernel in uninitialized_kernels:
-    #     # kernels.append(Kernel(kernel[0](**kernel[1]), f'{kernel[0].__name__}({kernel[1]})'))
-    #     kernels.append(
-    #         Kernel(
-    #             kernel[0](**kernel[1]),
-    #             f'{kernel[0].__name__}({", ".join(k + "=" + str(v) for k, v in kernel[1].items())})',
-    #         )
-    #     )
+    kernels = []
+    for kernel in uninitialized_kernels:
+        # kernels.append(Kernel(kernel[0](**kernel[1]), f'{kernel[0].__name__}({kernel[1]})'))
+        kernels.append(
+            Kernel(
+                kernel[0](**kernel[1]),
+                f'{kernel[0].__name__}({", ".join(k + "=" + str(v) for k, v in kernel[1].items())})',
+            )
+        )
 
-    # kernel_svm_search_space = {'C': np.geomspace(0.01, 100, 13), 'kernel': kernels}
-    # kernel_svm_kw_params = {'class_weight': 'balanced'}
+    kernel_svm_search_space = {'C': np.geomspace(0.01, 100, 13), 'kernel': kernels}
+    kernel_svm_kw_params = {'class_weight': 'balanced'}
 
-    # optimize_model(
-    #     model=SVC,
-    #     search_space=kernel_svm_search_space,
-    #     kw_params=kernel_svm_kw_params,
-    #     x_train=train_x_normalized,
-    #     y_train=train_y,
-    #     x_valid=valid_x_normalized,
-    #     y_valid=valid_y,
-    #     x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
-    #     y_all=point_cloud.classification.to_numpy(),
-    #     k_folds=k_folds,
-    #     num_cv_workers=num_cv_workers,
-    #     point_cloud=point_cloud,
-    #     model_name='Quantum Kernel SVM',
-    #     verbose=verbose,
-    #     visualize=visualize,
-    #     model_kw_params=None,
-    #     predict_full_dataset=predict_full_dataset,
-    #     score_valid=False,
-    #     write_data=write_data,
-    # )
+    optimize_model(
+        model=SVC,
+        search_space=kernel_svm_search_space,
+        kw_params=kernel_svm_kw_params,
+        x_train=train_x_normalized,
+        y_train=train_y,
+        x_valid=valid_x_normalized,
+        y_valid=valid_y,
+        x_all=(point_cloud[features].to_numpy() - train_mean) / train_std,
+        y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
+        num_cv_workers=num_cv_workers,
+        point_cloud=point_cloud,
+        model_name='Quantum Kernel SVM',
+        verbose=verbose,
+        visualize=visualize,
+        model_kw_params=None,
+        predict_full_dataset=predict_full_dataset,
+        score_valid=False,
+        write_data=write_data,
+    )
 
-    # ###################################################################################################################
-    # # QSVM w/ Quantum Kernels #########################################################################################
-    # ###################################################################################################################
+    ###################################################################################################################
+    # QSVM w/ Quantum Kernels #########################################################################################
+    ###################################################################################################################
 
-    # if verbose:
-    #     print('Optimizing QSVM model with Quantum Kernel...')
-    # kernel_qsvm_search_space = {
-    #     'B': [2],
-    #     'P': [0, 1],
-    #     'K': [3, 4, 5],
-    #     'zeta': [0.0, 0.4, 0.8, 1.2],
-    #     'kernel': kernels,
-    # }
-    # kernel_qsvm_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
+    if verbose:
+        print('Optimizing QSVM model with Quantum Kernel...')
+    kernel_qsvm_search_space = {
+        'B': [2],
+        'P': [0, 1],
+        'K': [3, 4, 5],
+        'zeta': [0.0, 0.4, 0.8, 1.2],
+        'kernel': kernels,
+    }
+    kernel_qsvm_kw_params = {'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
-    # optimize_model(
-    #     model=QSVM,
-    #     search_space=kernel_qsvm_search_space,
-    #     kw_params=kernel_qsvm_kw_params,
-    #     x_train=train_x,
-    #     y_train=train_y,
-    #     x_valid=valid_x,
-    #     y_valid=valid_y,
-    #     x_all=point_cloud[features].to_numpy(),
-    #     y_all=point_cloud.classification.to_numpy(),
-    #     k_folds=k_folds,
-    #     num_cv_workers=num_cv_workers,
-    #     point_cloud=point_cloud,
-    #     model_name='Quantum Kernel QSVM',
-    #     verbose=verbose,
-    #     visualize=visualize,
-    #     model_kw_params=None,
-    #     predict_full_dataset=predict_full_dataset,
-    #     score_valid=False,
-    #     write_data=write_data,
-    # )
+    optimize_model(
+        model=QSVM,
+        search_space=kernel_qsvm_search_space,
+        kw_params=kernel_qsvm_kw_params,
+        x_train=train_x,
+        y_train=train_y,
+        x_valid=valid_x,
+        y_valid=valid_y,
+        x_all=point_cloud[features].to_numpy(),
+        y_all=point_cloud.classification.to_numpy(),
+        k_folds=k_folds,
+        num_cv_workers=num_cv_workers,
+        point_cloud=point_cloud,
+        model_name='Quantum Kernel QSVM',
+        verbose=verbose,
+        visualize=visualize,
+        model_kw_params=None,
+        predict_full_dataset=predict_full_dataset,
+        score_valid=False,
+        write_data=write_data,
+    )
 
-    # ###################################################################################################################
-    # # QSVM Group w/ Quantum Kernels ###################################################################################
-    # ###################################################################################################################
+    ###################################################################################################################
+    # QSVM Group w/ Quantum Kernels ###################################################################################
+    ###################################################################################################################
 
     # model_kw_params = {'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
     # kernel_qsvm_group_search_space = {

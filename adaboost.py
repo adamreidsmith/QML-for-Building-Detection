@@ -1,4 +1,3 @@
-import warnings
 from typing import Callable
 from concurrent.futures import ThreadPoolExecutor
 
