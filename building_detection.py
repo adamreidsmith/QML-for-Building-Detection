@@ -409,7 +409,7 @@ def main():
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    svm_search_space = {'C': np.geomspace(0.001, 100, 16), 'gamma': np.geomspace(0.001, 100, 16)}
+    svm_search_space = {'C': np.geomspace(0.01, 10, 13), 'gamma': np.geomspace(0.01, 10, 13)}
     svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
 
     optimize_model(
@@ -443,7 +443,7 @@ def main():
         'P': [0, 1, 2],
         'K': [3, 4, 5],
         'zeta': [0.0, 0.4, 0.8, 1.2],
-        'gamma': np.geomspace(0.1, 1, 5),
+        'gamma': np.geomspace(0.01, 10, 13),
     }
     qsvm_kw_params = {'kernel': 'rbf', 'sampler': 'steepest_descent', 'num_reads': 100, 'normalize': True}
 
@@ -483,7 +483,7 @@ def main():
         'P': [0, 1],
         'K': [4, 5, 6],
         'zeta': [0.0, 0.4, 0.8, 1.2],
-        'gamma': np.geomspace(0.01 * np.sqrt(10), 10, 6),
+        'gamma': np.geomspace(0.1, 10 ** (3 / 4), 8),  # np.geomspace(0.01, 10, 13),
         'multiplier': np.geomspace(0.1, 10, 5),
         'SM': SM,
     }
@@ -560,7 +560,7 @@ def main():
             )
         )
 
-    kernel_svm_search_space = {'C': np.geomspace(0.01, 100, 13), 'kernel': kernels}
+    kernel_svm_search_space = {'C': np.geomspace(0.01, 10, 13), 'kernel': kernels}
     kernel_svm_kw_params = {'class_weight': 'balanced'}
 
     optimize_model(
@@ -677,7 +677,7 @@ def main():
 
     qboost_search_space = {
         'B': [2],
-        'P': [0, 1, 2, 3, 4],
+        'P': [0, 1, 2, 3],
         'K': [3, 4, 5, 6, 7, 8],
         'weak_classifiers': weak_classifiers,
     }
@@ -712,7 +712,7 @@ def main():
     if verbose:
         print('Optimizing AdaBoost model...')
     # Run the AdaBoost algorithm on the ensemble of weak QSVMs
-    adaboost_search_space = {'n_estimators': list(range(6, 80, 2)), 'weak_classifiers': weak_classifiers}
+    adaboost_search_space = {'n_estimators': list(range(6, 81, 2)), 'weak_classifiers': weak_classifiers}
     adaboost_kw_params = {}
 
     optimize_model(
