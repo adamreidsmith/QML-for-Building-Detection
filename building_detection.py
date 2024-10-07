@@ -234,18 +234,18 @@ def optimize_model(
     train_cm = confusion_matrix(best_clf.predict(x_train), y_train)
     print(f'{model_name} training MCC: {matthews_corrcoef(train_cm):.4f}')
     print(f'{model_name} training F1:  {f1_score(train_cm):.4f}')
-    print(f'{model_name} training acc: {accuracy(train_cm):.4f}')
+    print(f'{model_name} training acc: {accuracy(train_cm):.2%}')
     valid_cm = confusion_matrix(best_clf.predict(x_valid), y_valid)
     print(f'{model_name} validation MCC: {matthews_corrcoef(valid_cm):.4f}')
     print(f'{model_name} validation F1:  {f1_score(valid_cm):.4f}')
-    print(f'{model_name} validation acc: {accuracy(valid_cm):.4f}')
+    print(f'{model_name} validation acc: {accuracy(valid_cm):.2%}')
 
     if predict_full_dataset:
         point_cloud_preds = best_clf.predict(x_all)
         full_cm = confusion_matrix(point_cloud_preds, y_all)
-        print(f'{model_name} full dataset MCC: {matthews_corrcoef(full_cm):.2%}')
-        print(f'{model_name} full dataset F1:  {f1_score(full_cm):.3f}')
-        print(f'{model_name} full dataset acc: {accuracy(full_cm):.3f}')
+        print(f'{model_name} full dataset MCC: {matthews_corrcoef(full_cm):.4%}')
+        print(f'{model_name} full dataset F1:  {f1_score(full_cm):.4f}')
+        print(f'{model_name} full dataset acc: {accuracy(full_cm):.2%}')
 
         if visualize:
             visualize_cloud(point_cloud[['x', 'y', 'z']].to_numpy(), colors=point_cloud_preds, cmap='cool')
