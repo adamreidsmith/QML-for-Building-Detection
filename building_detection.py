@@ -1,5 +1,6 @@
 import math
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Any
@@ -8,6 +9,7 @@ from functools import partial
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 
+import dill
 import numpy as np
 import pandas as pd
 from sklearn.svm import SVC
@@ -39,13 +41,12 @@ load_dotenv()
 DATASET = sys.argv[1]
 assert DATASET in ('kits', 'downtown', 'ptgrey')
 
-start_index = int(sys.argv[2]) if len(sys.argv) >= 3 else 0
+start_index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 
 WORKING_DIR = Path(__file__).parent
 LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
 
-# SEED = int(sys.argv[1]) if len(sys.argv) > 1 else np.random.randint(100, 1_000_000)
-SEED = np.random.randint(100, 1_000_000)
+SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
 
 
 def downsample_point_cloud(point_cloud: pd.DataFrame, factor: float, keep_max: bool) -> pd.DataFrame:
@@ -260,12 +261,9 @@ def train_weak_classifiers(
     SM: list[tuple[int, int]],
     balance_classes: bool,
     verbose: bool = True,
-) -> list[QSVM]:
+) -> list[list[QSVM]]:
 
     # SM = (Number of classifiers, Size of subsets)
-    # n_weak_classifiers = 50
-    # samples_per_classifier = 20
-    # balance_classes = True
 
     weak_classifiers = []
     for S, M in SM:
@@ -324,6 +322,11 @@ def get_data(
         data_file = WORKING_DIR / 'data' / '483000_5457000_ptgrey' / '1m_lidar.csv'
     point_cloud = pd.read_csv(data_file)
 
+    if n_train_samples + n_valid_samples > len(point_cloud):
+        raise ValueError(
+            f'Cannot sample {n_train_samples + n_valid_samples} samples from point cloud of size {len(point_cloud)}'
+        )
+
     # Map building points to 1 and all others to -1
     point_cloud.classification = point_cloud.classification.map(lambda x: 1 if x == 6 else -1)
     # visualize_cloud(
@@ -350,8 +353,6 @@ def get_data(
         np.random.shuffle(indices)
         train_indices = indices[:n_train_samples]
         valid_indices = indices[-n_valid_samples:]
-
-        features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
 
         train_x = pc[features].iloc[train_indices].to_numpy()
         valid_x = pc[features].iloc[valid_indices].to_numpy()
@@ -394,7 +395,7 @@ def get_data(
     )
 
 
-def main():
+def hpo():
     if SEED is not None:
         print(f'Using {SEED = }')
         np.random.seed(SEED)
@@ -640,49 +641,6 @@ def main():
             write_data=write_data,
         )
 
-    # ###################################################################################################################
-    # # QSVM Group w/ Quantum Kernels ###################################################################################
-    # ###################################################################################################################
-
-    # model_kw_params = {'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
-    # kernel_qsvm_group_search_space = {
-    #     'B': [2],
-    #     'P': [0, 1],
-    #     'K': [3, 4, 5],
-    #     'zeta': [0.0, 0.4, 0.8, 1.2],
-    #     'kernel': kernels,
-    #     'multiplier': [1.0],
-    #     'SM': SM,
-    # }
-    # kernel_qsvm_group_kw_params = {
-    #     'sampler': 'steepest_descent',
-    #     'num_reads': 100,
-    #     'normalize': True,
-    #     'balance_classes': balance_classes,
-    # }
-
-    # optimize_model(
-    #     model=QSVMGroup,
-    #     search_space=kernel_qsvm_group_search_space,
-    #     kw_params=kernel_qsvm_group_kw_params,
-    #     x_train=train_x,
-    #     y_train=train_y,
-    #     x_valid=valid_x,
-    #     y_valid=valid_y,
-    #     x_all=point_cloud[features].to_numpy(),
-    #     y_all=point_cloud.classification.to_numpy(),
-    #     k_folds=k_folds,
-    #     num_cv_workers=num_cv_workers,
-    #     point_cloud=point_cloud,
-    #     model_name='Quantum Kernel QSVM Group',
-    #     verbose=verbose,
-    #     visualize=visualize,
-    #     model_kw_params=model_kw_params,
-    #     predict_full_dataset=predict_full_dataset,
-    #     score_valid=False,
-    #     write_data=write_data,
-    # )
-
     ###################################################################################################################
     # Weak Classifiers ################################################################################################
     ###################################################################################################################
@@ -755,5 +713,231 @@ def main():
         )
 
 
+def train_eval_large(
+    model: Any,
+    model_name: str,
+    params: dict[str, Any],
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_valid: np.ndarray,
+    y_valid: np.ndarray,
+    verbose: bool,
+    write_data: bool,
+    qsvm_group_params: Optional[dict[str, Any]] = None,
+) -> Any:
+    if model == QSVMGroup:
+        clf = model(params, **qsvm_group_params)
+    else:
+        clf = model(**params)
+
+    if verbose:
+        print(f'Fitting {model_name} on {len(x_train)} points...')
+
+    # The fit method for QBoost takes validation data as well
+    fit_args = [x_train, y_train]
+    if model == QBoost:
+        fit_args += [x_valid[: len(x_train)], y_valid[: len(x_train)]]
+    t_start = time.perf_counter()
+    clf.fit(*fit_args)
+
+    if verbose:
+        print(f'Fit {model_name} in time {time.perf_counter() - t_start}')
+        print('Evaluating {model_name} on {len(x_valid)} points...')
+
+    t_start = time.perf_counter()
+    valid_preds = clf.predict(x_valid)
+
+    if verbose:
+        print(f'Evaluated {model_name} in time {time.perf_counter() - t_start}')
+        cm = confusion_matrix(valid_preds, y_valid)
+        mcc = matthews_corrcoef(cm)
+        acc = accuracy(cm)
+        f1 = f1_score(cm)
+        print(f'{model_name} validation results:')
+        print(f'\tMCC: {mcc:.4f}   Acc: {acc:.2%}   F1: {f1:.4f}   CM: {list(cm)}')
+
+    if write_data:
+        with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.plk', 'wb') as f:
+            dill.dump(clf, f)
+        valid_preds = list(map(int, valid_preds))
+        with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'w') as f:
+            f.write(valid_preds)
+
+    return clf
+
+
+def run_large():
+    if SEED is not None:
+        print(f'Using {SEED = }')
+        np.random.seed(SEED)
+
+    verbose = True
+    num_qsvm_group_workers = 8
+    write_data = True
+    visualize = False
+
+    # Choose a random subset of points as a train set
+    n_train_samples = 10_000
+    n_valid_samples = 1_000_000
+
+    features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
+
+    point_cloud, train_x, train_y, valid_x, valid_y, train_x_normalized, valid_x_normalized, train_mean, train_std = (
+        get_data(n_train_samples, n_valid_samples, features, verbose, visualize)
+    )
+
+    ###################################################################################################################
+    # SVM #############################################################################################################
+    ###################################################################################################################
+
+    if start_index == 0:
+        params = dict(C=1, gamma=0.1, kernel='rbf', class_weight='balanced')
+        train_eval_large(
+            model=SVC,
+            model_name='SVM',
+            params=params,
+            x_train=train_x_normalized,
+            y_train=train_y,
+            x_valid=valid_x_normalized,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+        )
+
+    ###################################################################################################################
+    # QSVM ############################################################################################################
+    ###################################################################################################################
+
+    if start_index <= 1:
+        params = dict(
+            B=2, P=0, K=3, zeta=0.8, gamma=0.1, kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True
+        )
+        train_eval_large(
+            model=QSVM,
+            model_name='QSVM',
+            params=params,
+            x_train=train_x,
+            y_train=train_y,
+            x_valid=valid_x,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+        )
+
+    ###################################################################################################################
+    # QSVM Group ######################################################################################################
+    ###################################################################################################################
+
+    if start_index <= 2:
+        qsvm_group_params = dict(S=50, M=20, multiplier=10.0, balance_classes=True, num_workers=num_qsvm_group_workers)
+        qsvm_params = dict(
+            B=2, P=0, K=3, zeta=0.8, gamma=1.0, kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True
+        )
+        train_eval_large(
+            model=QSVMGroup,
+            model_name='QSVM Group',
+            params=qsvm_params,
+            x_train=train_x,
+            y_train=train_y,
+            x_valid=valid_x,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+            qsvm_group_params=qsvm_group_params,
+        )
+
+    ###################################################################################################################
+    # SVM w/ Quantum Kernel ###########################################################################################
+    ###################################################################################################################
+
+    if start_index <= 3:
+        kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+        params = dict(C=1, kernel=kernel, class_weight='balanced')
+        train_eval_large(
+            model=SVC,
+            model_name='SVM with Quantum Kernel',
+            params=params,
+            x_train=train_x_normalized,
+            y_train=train_y,
+            x_valid=valid_x_normalized,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+        )
+
+    ###################################################################################################################
+    # QSVM w/ Quantum Kernels #########################################################################################
+    ###################################################################################################################
+
+    if start_index <= 4:
+        kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+        params = dict(
+            B=2, P=0, K=3, zeta=0.8, kernel=kernel, sampler='steepest_descent', num_reads=100, normalize=True
+        )
+        train_eval_large(
+            model=QSVM,
+            model_name='QSVM with Quantum Kernel',
+            params=params,
+            x_train=train_x,
+            y_train=train_y,
+            x_valid=valid_x,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+        )
+
+    ###################################################################################################################
+    # Weak Classifiers ################################################################################################
+    ###################################################################################################################
+
+    weak_classifiers = train_weak_classifiers(
+        train_x=train_x, train_y=train_y, SM=[(50, 20)], balance_classes=True, verbose=verbose
+    )[0]
+
+    ###################################################################################################################
+    # QBoost ##########################################################################################################
+    ###################################################################################################################
+
+    if start_index <= 5:
+        params = dict(
+            B=2,
+            P=0,
+            K=3,
+            weak_classifiers=weak_classifiers,
+            lbda=(0.0, 2.1, 0.1),
+            sampler='steepest_descent',
+            num_reads=100,
+        )
+        train_eval_large(
+            model=QBoost,
+            model_name='QBoost',
+            params=params,
+            x_train=train_x,
+            y_train=train_y,
+            x_valid=valid_x,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+        )
+
+    ###################################################################################################################
+    # AdaBoost ########################################################################################################
+    ###################################################################################################################
+
+    if start_index <= 6:
+        params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
+        train_eval_large(
+            model=AdaBoost,
+            model_name='AdaBoost',
+            params=params,
+            x_train=train_x,
+            y_train=train_y,
+            x_valid=valid_x,
+            y_valid=valid_y,
+            verbose=verbose,
+            write_data=write_data,
+        )
+
+
 if __name__ == '__main__':
-    main()
+    hpo()
