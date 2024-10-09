@@ -1,6 +1,6 @@
 import math
-import sys
 import time
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Any
@@ -30,23 +30,6 @@ from quantum_kernels import (
     data_reuploading_feature_map,
 )
 from utils import accuracy, visualize_cloud, confusion_matrix, matthews_corrcoef, f1_score
-
-
-# Set DWave API token
-load_dotenv()
-
-# DATASET = 'kits'
-# DATASET = 'downtown'
-# DATASET = 'ptgrey'
-DATASET = sys.argv[1]
-assert DATASET in ('kits', 'downtown', 'ptgrey')
-
-start_index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-
-WORKING_DIR = Path(__file__).parent
-LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
-
-SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
 
 
 def downsample_point_cloud(point_cloud: pd.DataFrame, factor: float, keep_max: bool) -> pd.DataFrame:
@@ -940,4 +923,17 @@ def run_large():
 
 
 if __name__ == '__main__':
+    # Set DWave API token
+    load_dotenv()
+
+    DATASET = sys.argv[1]
+    assert DATASET in ('kits', 'downtown', 'ptgrey')
+
+    WORKING_DIR = Path(__file__).parent
+    LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
+
+    start_index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+
+    SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
+
     hpo()
