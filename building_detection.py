@@ -405,7 +405,7 @@ def hpo():
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    if start_index == 0:
+    if MODELS is None or '0' in MODELS:
         svm_search_space = {'C': np.geomspace(0.01, 10, 13), 'gamma': np.geomspace(0.01, 10, 13)}
         svm_kw_params = {'class_weight': 'balanced', 'kernel': 'rbf'}
 
@@ -435,7 +435,7 @@ def hpo():
     # QSVM ############################################################################################################
     ###################################################################################################################
 
-    if start_index <= 1:
+    if MODELS is None or '1' in MODELS:
         qsvm_search_space = {
             'B': [2],
             'P': [0, 1, 2],
@@ -475,7 +475,7 @@ def hpo():
     SM = [(20, 50), (50, 20), (40, 40)]  # (Number of classifiers, Size of subsets)
     balance_classes = True
 
-    if start_index <= 2:
+    if MODELS is None or '2' in MODELS:
         model_kw_params = {'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
         qsvm_group_search_space = {
             'B': [2],
@@ -519,7 +519,7 @@ def hpo():
     # SVM w/ Quantum Kernel ###########################################################################################
     ###################################################################################################################
 
-    if start_index <= 4:
+    if MODELS is None or '3' in MODELS or '4' in MODELS:
         n_features = 4
 
         if verbose:
@@ -562,7 +562,7 @@ def hpo():
                 )
             )
 
-    if start_index <= 3:
+    if MODELS is None or '3' in MODELS:
         kernel_svm_search_space = {'C': np.geomspace(0.01, 10, 13), 'kernel': kernels}
         kernel_svm_kw_params = {'class_weight': 'balanced'}
 
@@ -592,7 +592,7 @@ def hpo():
     # QSVM w/ Quantum Kernels #########################################################################################
     ###################################################################################################################
 
-    if start_index <= 4:
+    if MODELS is None or '4' in MODELS:
         kernel_qsvm_search_space = {
             'B': [2],
             'P': [0, 1],
@@ -628,13 +628,14 @@ def hpo():
     # Weak Classifiers ################################################################################################
     ###################################################################################################################
 
-    weak_classifiers = train_weak_classifiers(train_x, train_y, SM, balance_classes, verbose)
+    if MODELS is None or '5' in MODELS or '6' in MODELS:
+        weak_classifiers = train_weak_classifiers(train_x, train_y, SM, balance_classes, verbose)
 
     ###################################################################################################################
     # QBoost ##########################################################################################################
     ###################################################################################################################
 
-    if start_index <= 5:
+    if MODELS is None or '5' in MODELS:
         qboost_search_space = {
             'B': [2],
             'P': [0, 1, 2, 3],
@@ -669,7 +670,7 @@ def hpo():
     # AdaBoost ########################################################################################################
     ###################################################################################################################
 
-    if start_index <= 6:
+    if MODELS is None or '6' in MODELS:
         adaboost_search_space = {'n_estimators': list(range(6, 81, 2)), 'weak_classifiers': weak_classifiers}
         adaboost_kw_params = {}
 
@@ -773,7 +774,7 @@ def run_large():
     # SVM #############################################################################################################
     ###################################################################################################################
 
-    if start_index == 0:
+    if MODELS is None or '0' in MODELS:
         params = dict(C=1, gamma=0.1, kernel='rbf', class_weight='balanced')
         train_eval_large(
             model=SVC,
@@ -791,7 +792,7 @@ def run_large():
     # QSVM ############################################################################################################
     ###################################################################################################################
 
-    if start_index <= 1:
+    if MODELS is None or '1' in MODELS:
         params = dict(
             B=2, P=0, K=3, zeta=0.8, gamma=0.1, kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True
         )
@@ -811,7 +812,7 @@ def run_large():
     # QSVM Group ######################################################################################################
     ###################################################################################################################
 
-    if start_index <= 2:
+    if MODELS is None or '2' in MODELS:
         qsvm_group_params = dict(S=50, M=20, multiplier=10.0, balance_classes=True, num_workers=num_qsvm_group_workers)
         qsvm_params = dict(
             B=2, P=0, K=3, zeta=0.8, gamma=1.0, kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True
@@ -833,7 +834,7 @@ def run_large():
     # SVM w/ Quantum Kernel ###########################################################################################
     ###################################################################################################################
 
-    if start_index <= 3:
+    if MODELS is None or '3' in MODELS:
         kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
         params = dict(C=1, kernel=kernel, class_weight='balanced')
         train_eval_large(
@@ -852,7 +853,7 @@ def run_large():
     # QSVM w/ Quantum Kernels #########################################################################################
     ###################################################################################################################
 
-    if start_index <= 4:
+    if MODELS is None or '4' in MODELS:
         kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
         params = dict(
             B=2, P=0, K=3, zeta=0.8, kernel=kernel, sampler='steepest_descent', num_reads=100, normalize=True
@@ -873,15 +874,16 @@ def run_large():
     # Weak Classifiers ################################################################################################
     ###################################################################################################################
 
-    weak_classifiers = train_weak_classifiers(
-        train_x=train_x, train_y=train_y, SM=[(50, 20)], balance_classes=True, verbose=verbose
-    )[0]
+    if MODELS is None or '5' in MODELS or '6' in MODELS:
+        weak_classifiers = train_weak_classifiers(
+            train_x=train_x, train_y=train_y, SM=[(50, 20)], balance_classes=True, verbose=verbose
+        )[0]
 
     ###################################################################################################################
     # QBoost ##########################################################################################################
     ###################################################################################################################
 
-    if start_index <= 5:
+    if MODELS is None or '5' in MODELS:
         params = dict(
             B=2,
             P=0,
@@ -907,7 +909,7 @@ def run_large():
     # AdaBoost ########################################################################################################
     ###################################################################################################################
 
-    if start_index <= 6:
+    if MODELS is None or '6' in MODELS:
         params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
         train_eval_large(
             model=AdaBoost,
@@ -932,7 +934,7 @@ if __name__ == '__main__':
     WORKING_DIR = Path(__file__).parent
     LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
 
-    start_index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    MODELS = sys.argv[2] if len(sys.argv) > 2 else None
 
     SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
 
