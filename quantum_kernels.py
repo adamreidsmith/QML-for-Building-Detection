@@ -1,6 +1,5 @@
 import warnings
 from typing import Optional
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from itertools import combinations, chain
 
@@ -11,6 +10,8 @@ from qiskit.circuit.library import PauliFeatureMap
 from qiskit.quantum_info import Statevector
 
 from qiskit_machine_learning.kernels import FidelityStatevectorKernel
+
+from utils import LimitedSizeDict
 
 
 class VectorizeKernel:
@@ -108,26 +109,6 @@ class Kernel:
 
     def __repr__(self) -> str:
         return self.__str__()
-
-
-class LimitedSizeDict(OrderedDict):
-    '''
-    Source: https://stackoverflow.com/a/2437645
-    '''
-
-    def __init__(self, *args, **kwargs):
-        self.size_limit = kwargs.pop('size_limit', None)
-        OrderedDict.__init__(self, *args, **kwargs)
-        self._check_size_limit()
-
-    def __setitem__(self, key, value):
-        OrderedDict.__setitem__(self, key, value)
-        self._check_size_limit()
-
-    def _check_size_limit(self):
-        if self.size_limit is not None:
-            while len(self) > self.size_limit:
-                self.popitem(last=False)
 
 
 class StatevectorKernel:

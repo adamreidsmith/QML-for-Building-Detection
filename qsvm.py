@@ -3,10 +3,12 @@ import time
 import numbers
 import warnings
 from typing import Optional, Any
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import partial
 
 import numpy as np
+import dimod
+from dimod import BinaryQuadraticModel
 from dwave.samplers import SimulatedAnnealingSampler, TabuSampler, SteepestDescentSampler
 from dwave.system import LeapHybridSampler, DWaveSampler, AutoEmbeddingComposite
 from sklearn.metrics.pairwise import linear_kernel, rbf_kernel, polynomial_kernel, sigmoid_kernel
@@ -111,11 +113,12 @@ class QSVM(ClassifierMixin, BaseEstimator):
         'normalize': ['boolean'],  # boolean
         'multi_class_strategy': [Options(str, {'ovo', 'ovr'})],  # valid string options
         'dwave_api_token': [str, None],
+        'threshold': [Interval(numbers.Real, 0.0, None, closed='left')],  # non-negative float
     }
 
     def __init__(
         self,
-        kernel: str | Callable[[np.ndarray, np.ndarray], float] = 'rbf',
+        kernel: str | Callable[[np.ndarray, np.ndarray], float | np.ndarray] = 'rbf',
         B: int = 2,
         P: int = 0,
         K: int = 4,
@@ -129,14 +132,17 @@ class QSVM(ClassifierMixin, BaseEstimator):
         normalize: bool = True,
         multi_class_strategy: str = 'ovo',
         dwave_api_token: Optional[str] = None,
+        threshold: float = 0.0,
+        optimize_memory: bool = True,
     ) -> None:
         '''
         Parameters
         ----------
         kernel : str | Callable[[np.ndarray, np.ndarray], float]
             Specifies the kernel type to be used in the algorithm. If a string, one of 'linear', 'rbf', 'poly',
-            or 'sigmiod'. If a Callable, it must accept two 2D numpy arrays X and Y as arguments, and return a
-            2D array of shape (X.shape[0], Y.shape[0]). Default is 'rbf'.
+            or 'sigmiod'. If a Callable, it must accept either two 2D or 2 1D numpy arrays X and Y as arguments,
+            If 2D, it must return the 2D kernel matrix of shape (X.shape[0], Y.shape[0]).  If 1D, it must return
+            the kernel of X with Y as a float. Default is 'rbf'.
         B : int
             Base to use in the binary encoding of the QSVM coefficients. See equation (10) in [1].
             Default is 2.
@@ -177,6 +183,11 @@ class QSVM(ClassifierMixin, BaseEstimator):
             'hybrid' or 'qa'). In this case, the environment variable DWAVE_API_TOKEN is set to the provided token. It
             is not necessary if quantum computation is being simulated (sampler is 'simulate', 'tabu', or
             'steepest_descent'). Default is None.
+        threshold : float
+            A threshold to use in the QSVM QUBO model.  Biases and coupling strengths with absolute value below this
+            threshold are set to zero to reduce the size of the QUBO and speed up computation. Default is 0.0.
+        optimize_memory : bool
+            Whether or not to optimize the memory usage at the expense of computation time. Default is True.
         '''
 
         self.B = B  # Base of the encoding
@@ -199,6 +210,8 @@ class QSVM(ClassifierMixin, BaseEstimator):
         self.normalize = normalize
         self.multi_class_strategy = multi_class_strategy
         self.dwave_api_token = dwave_api_token
+        self.threshold = threshold
+        self.optimize_memory = optimize_memory
 
     def _define_kernel(self) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
         '''
@@ -206,18 +219,56 @@ class QSVM(ClassifierMixin, BaseEstimator):
         '''
 
         if callable(self.kernel):
-            kernel = self.kernel
+            kernels = self.kernel, self.kernel
         elif self.kernel == 'linear':
-            kernel = linear_kernel
+            kernels = linear_kernel, self._linear_kernel1D
         elif self.kernel == 'rbf':
-            kernel = partial(rbf_kernel, gamma=self.gamma)
+            kernels = partial(rbf_kernel, gamma=self.gamma), partial(self._rbf_kernel1D, gamma=self.gamma)
         elif self.kernel == 'sigmoid':
-            kernel = partial(sigmoid_kernel, gamma=self.gamma, coef0=self.coef0)
+            kernels = (
+                partial(sigmoid_kernel, gamma=self.gamma, coef0=self.coef0),
+                partial(self._sigmoid_kernel1D, gamma=self.gamma, coef0=self.coef0),
+            )
         elif self.kernel == 'poly':
-            kernel = partial(polynomial_kernel, gamma=self.gamma, coef0=self.coef0, degree=self.degree)
+            kernels = (
+                partial(polynomial_kernel, gamma=self.gamma, coef0=self.coef0, degree=self.degree),
+                partial(self._polynomial_kernel1D, gamma=self.gamma, coef0=self.coef0, degree=self.degree),
+            )
         else:
             raise ValueError(f'Unknown kernel: {self.kernel}')
-        return kernel
+        return kernels
+
+    @staticmethod
+    def _linear_kernel1D(X: np.ndarray, Y: np.ndarray) -> float:
+        '''
+        Compute the linear kernel of a single pair of samples.
+        '''
+
+        return X @ Y
+
+    @staticmethod
+    def _rbf_kernel1D(X: np.ndarray, Y: np.ndarray, gamma: float) -> float:
+        '''
+        Compute the RBF kernel of a single pair of samples.
+        '''
+
+        return np.exp(-gamma * ((X - Y) ** 2).sum())
+
+    @staticmethod
+    def _sigmoid_kernel1D(X: np.ndarray, Y: np.ndarray, gamma: float, coef0: float) -> float:
+        '''
+        Compute the sigmoid kernel of a single pair of samples.
+        '''
+
+        return np.tanh(gamma * X @ Y + coef0)
+
+    @staticmethod
+    def _polynomial_kernel1D(X: np.ndarray, Y: np.ndarray, gamma: float, coef0: float, degree: int) -> float:
+        '''
+        Compute the polynomial kernel of a single pair of samples.
+        '''
+
+        return (gamma * X @ Y + coef0) ** degree
 
     @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X: np.ndarray, y: np.ndarray) -> 'QSVM':
@@ -277,12 +328,10 @@ class QSVM(ClassifierMixin, BaseEstimator):
         self.y_ = y_
         self.N_ = self.X_.shape[0]  # Number of train points
 
-        # Compute the kernel matrix from the train data
-        self.kernel_func_ = self._define_kernel()
-        self.computed_kernel_ = self.kernel_func_(self.X_, self.X_)
-
-        # self.qubo_ = self._compute_qubo()
-        self.qubo_ = self._compute_qubo_fast()
+        self.kernel_func_2D_, self.kernel_func_1D_ = self._define_kernel()
+        if not self.optimize_memory:
+            self.computed_kernel_ = self.kernel_func_2D_(self.X_, self.X_)
+            self.qubo_ = self._compute_qubo_fast()
 
         sample = self._run_sampler()
         self.alphas_ = self._compute_qsvm_coefficients(sample)
@@ -313,41 +362,31 @@ class QSVM(ClassifierMixin, BaseEstimator):
             self.normalization_stdev_ = np.std(X, axis=0)
         return (X - self.normalization_mean_) / self.normalization_stdev_
 
-    def _compute_qubo(self) -> np.ndarray:
+    def _qubo_generator(self) -> Iterator[tuple[tuple[int, int], float]]:
         '''
-        Compute the QUBO matrix associated to the QSVM problem from the precomputed kernel
-        and the targets y.
+        Generate QUBO elements on-the-fly to save memory.
         '''
+        k = np.arange(self.K).reshape(self.K, 1)
+        j = np.arange(self.K)
+        base_power = self.B_ ** (k + j - 2.0 * self.P)
+        base_power_single = self.B_ ** (j - self.P)
 
-        coeff_matrix = self.computed_kernel_ + self.zeta  # N x N array
         for n in range(self.N_):
-            for m in range(self.N_):
-                coeff_matrix[n, m] *= 0.5 * self.y_[n] * self.y_[m]
-
-        base_power = np.empty((self.K, self.K))  # K x K array
-        for k in range(self.K):
-            for j in range(self.K):
-                base_power[k, j] = self.B_ ** (k + j - 2 * self.P)
-
-        # Formulate the QUBO as an upper triangular matrix
-        qubo = {}
-        for n in range(self.N_):
-            for m in range(self.N_):
+            for m in range(n, self.N_):
+                coeff = self.y_[n] * self.y_[m] * (self.kernel_func_1D_(self.X_[n], self.X_[m]) + self.zeta)
                 for k in range(self.K):
                     for j in range(self.K):
-                        kk = self.K * n + k
+                        ii = self.K * n + k
                         jj = self.K * m + j
-                        if kk < jj:
-                            qubo[(kk, jj)] = 2 * coeff_matrix[n, m] * base_power[k, j]
-                        elif kk == jj:
-                            qubo[(kk, jj)] = coeff_matrix[n, m] * base_power[k, j] - self.B_ ** (k - self.P)
-        return qubo
+                        if ii < jj:
+                            yield (ii, jj), coeff * base_power[k, j]
+                        elif ii == jj:
+                            yield (ii, jj), 0.5 * coeff * base_power[k, j] - base_power_single[k]
 
     def _compute_qubo_fast(self) -> np.ndarray:
         '''
         Compute the QUBO matrix associated to the QSVM problem from the precomputed kernel
-        and the targets y. This performs the same operation as self._compute_qubo but utilizes
-        numpy array methods for parallelization.
+        and the targets y.
         '''
 
         # Compute the coefficients without the base exponent or diagonal adjustments
@@ -375,7 +414,12 @@ class QSVM(ClassifierMixin, BaseEstimator):
         qubo_array[lower_triangle_indices] = 0
         qubo_array[upper_triangle_indices] *= 2
 
-        qubo = {(i, j): qubo_array[(i, j)] for i in range(self.K * self.N_) for j in range(i, self.K * self.N_)}
+        qubo = {
+            (i, j): q
+            for i in range(self.K * self.N_)
+            for j in range(i, self.K * self.N_)
+            if np.abs(q := qubo_array[(i, j)]) > 0
+        }
         return qubo
 
     def _run_sampler(self) -> dict[int, int]:
@@ -384,13 +428,15 @@ class QSVM(ClassifierMixin, BaseEstimator):
         indices of the binary variables to their values.
         '''
 
-        if self.sampler == 'hybrid':
-            return retry(self._run_hybrid_sampler, max_retries=2, delay=1, warn=True)
-        return retry(self._run_pure_sampler, max_retries=2, delay=1, warn=True)
+        qubo_generator = self._qubo_generator() if self.optimize_memory else None
 
-    def _run_pure_sampler(self) -> dict[int, int]:
+        if self.sampler == 'hybrid':
+            return retry(self._run_hybrid_sampler, max_retries=2, delay=1, warn=True, qubo_generator=qubo_generator)
+        return retry(self._run_pure_sampler, max_retries=2, delay=1, warn=True, qubo_generator=qubo_generator)
+
+    def _run_pure_sampler(self, qubo_generator: Optional[Iterator[tuple[tuple[int, int], float]]]) -> dict[int, int]:
         '''
-        Run a purely quantum or classical sampling method on self.qubo_.
+        Run a purely quantum or classical sampling method on the QUBO.
         '''
 
         if self.sampler == 'simulate':
@@ -406,17 +452,39 @@ class QSVM(ClassifierMixin, BaseEstimator):
         else:
             raise ValueError(f'Unknown pure sampler: {self.sampler}')
 
-        sample_set = sampler.sample_qubo(self.qubo_, num_reads=self.num_reads)
-        return sample_set.first.sample
+        return self._run_from_sampler(sampler, qubo_generator, dict(num_reads=self.num_reads))
 
-    def _run_hybrid_sampler(self) -> dict[int, int]:
+    def _run_hybrid_sampler(self, qubo_generator: Optional[Iterator[tuple[tuple[int, int], float]]]) -> dict[int, int]:
         '''
-        Run the Leap hybrid sampler on self.qubo_.
+        Run the Leap hybrid sampler on the QUBO.
         '''
 
         if self._hybrid_sampler is None:
             self._set_hybrid_sampler()
-        sample_set = self._hybrid_sampler.sample_qubo(self.qubo_, time_limit=self.hybrid_time_limit)
+        return self._run_from_sampler(self._hybrid_sampler, qubo_generator, dict(time_limit=self.hybrid_time_limit))
+
+    def _run_from_sampler(
+        self,
+        sampler: dimod.Sampler,
+        qubo_generator: Optional[Iterator[tuple[tuple[int, int], float]]],
+        sampler_kwargs: dict[str, Any],
+    ) -> dict[int, int]:
+        '''
+        Run a given sampler on the QUBO.
+        '''
+
+        if qubo_generator is not None:
+            bqm = BinaryQuadraticModel(vartype=dimod.BINARY, dtype=np.float32)
+            for (u, v), bias in qubo_generator:
+                if self.threshold and abs(bias) > self.threshold:
+                    continue
+                if u == v:
+                    bqm.add_linear(u, bias)
+                else:
+                    bqm.add_quadratic(u, v, bias)
+            sample_set = sampler.sample(bqm, **sampler_kwargs)
+        else:
+            sample_set = sampler.sample_qubo(self.qubo_, **sampler_kwargs)
         return sample_set.first.sample
 
     @classmethod
@@ -494,18 +562,23 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         return self._decision_function_no_bias(X) + self.bias_
 
-    def _decision_function_no_bias(self, X: np.ndarray) -> np.ndarray:
+    def _decision_function_no_bias(self, X: np.ndarray, chunk_size: int = 1000) -> np.ndarray:
         '''
         The decision function without the bias term. This is implemented separately from self.decision_function
         for use with bias optimization.
         '''
 
-        # kernel_vals = self.kernel_func(self.X, X)
-        # return sum(self.alphas[n] * self.y[n] * kernel_vals[n, :] for n in range(self.N))
+        if self.optimize_memory:
+            results = np.zeros(X.shape[0])
+            for i in range(0, X.shape[0], chunk_size):  # Process in chunks of chunk_size
+                chunk = X[i : i + chunk_size]
+                kernel_chunk = self.kernel_func_2D_(self.X_, chunk)
+                results[i : i + chunk_size] = (self.alphas_ * self.y_) @ kernel_chunk
+        else:
+            computed_kernel = self.computed_kernel_ if np.array_equal(X, self.X_) else self.kernel_func_2D_(self.X_, X)
+            results = (self.alphas_ * self.y_) @ computed_kernel
 
-        # Same as above 2 lines, but faster
-        computed_kernel = self.computed_kernel_ if np.array_equal(X, self.X_) else self.kernel_func_(self.X_, X)
-        return (self.alphas_ * self.y_) @ computed_kernel
+        return results
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         '''

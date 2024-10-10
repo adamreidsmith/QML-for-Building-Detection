@@ -191,7 +191,7 @@ def optimize_model(
                 params_to_print['M'] = len(weak_classifiers[0].X_)
             else:
                 params_to_print = params
-            with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
+            with open(HPO_LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'a') as f:
                 print(f'{mcc:.4f};{";".join(map(str, cm))};{params_to_print | kw_params}', file=f)
 
     # The best accuracy, and a list of the parameter sets that provide that accuracy
@@ -349,15 +349,15 @@ def get_data(
     if verbose:
         print(
             'Train set:'
-            f'\n\tTotal # points:        {n_train_samples}'
-            f'\n\t# building points:     {sum(1 for y in train_y if y == 1)}'
-            f'\n\t# non-building points: {sum(1 for y in train_y if y == -1)}'
+            f'\n\tTotal # points:        {n_train_samples:_}'
+            f'\n\t# building points:     {sum(1 for y in train_y if y == 1):_}'
+            f'\n\t# non-building points: {sum(1 for y in train_y if y == -1):_}'
         )
         print(
             'Validation set:'
-            f'\n\tTotal # points:        {n_valid_samples}'
-            f'\n\t# building points:     {sum(1 for y in valid_y if y == 1)}'
-            f'\n\t# non-building points: {sum(1 for y in valid_y if y == -1)}'
+            f'\n\tTotal # points:        {n_valid_samples:_}'
+            f'\n\t# building points:     {sum(1 for y in valid_y if y == 1):_}'
+            f'\n\t# non-building points: {sum(1 for y in valid_y if y == -1):_}'
         )
 
     if visualize:
@@ -392,7 +392,7 @@ def hpo():
     num_cv_workers = 3
 
     # Choose a random subset of points as a train set
-    n_train_samples = 1000
+    n_train_samples = 1_000
     n_valid_samples = 100_000
 
     features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
@@ -715,7 +715,7 @@ def train_eval_large(
         clf = model(**params)
 
     if verbose:
-        print(f'Fitting {model_name} on {len(x_train)} points...')
+        print(f'Fitting {model_name} on {len(x_train):_} points...')
 
     # The fit method for QBoost takes validation data as well
     fit_args = [x_train, y_train]
@@ -725,14 +725,14 @@ def train_eval_large(
     clf.fit(*fit_args)
 
     if verbose:
-        print(f'Fit {model_name} in time {time.perf_counter() - t_start}')
-        print('Evaluating {model_name} on {len(x_valid)} points...')
+        print(f'Fit {model_name} in time {time.perf_counter() - t_start:.3f}s')
+        print(f'Evaluating {model_name} on {len(x_valid):_} points...')
 
     t_start = time.perf_counter()
     valid_preds = clf.predict(x_valid)
 
     if verbose:
-        print(f'Evaluated {model_name} in time {time.perf_counter() - t_start}')
+        print(f'Evaluated {model_name} in time {time.perf_counter() - t_start:.3f}s')
         cm = confusion_matrix(valid_preds, y_valid)
         mcc = matthews_corrcoef(cm)
         acc = accuracy(cm)
@@ -741,11 +741,15 @@ def train_eval_large(
         print(f'\tMCC: {mcc:.4f}   Acc: {acc:.2%}   F1: {f1:.4f}   CM: {list(cm)}')
 
     if write_data:
-        with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.plk', 'wb') as f:
+        if verbose:
+            print(f'Writing {model_name} model...')
+        with open(LARGE_LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.plk', 'wb') as f:
             dill.dump(clf, f)
-        valid_preds = list(map(int, valid_preds))
-        with open(LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'w') as f:
-            f.write(valid_preds)
+        if verbose:
+            print(f'Writing {model_name} predictions...')
+        valid_preds_str = str(list(map(int, valid_preds)))
+        with open(LARGE_LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'w') as f:
+            f.write(valid_preds_str)
 
     return clf
 
@@ -757,12 +761,12 @@ def run_large():
 
     verbose = True
     num_qsvm_group_workers = 8
-    write_data = True
+    write_data = False
     visualize = False
 
     # Choose a random subset of points as a train set
-    n_train_samples = 10_000
-    n_valid_samples = 1_000_000
+    n_train_samples = 1_000
+    n_valid_samples = 100_000
 
     features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
 
@@ -775,7 +779,14 @@ def run_large():
     ###################################################################################################################
 
     if MODELS is None or '0' in MODELS:
-        params = dict(C=1, gamma=0.1, kernel='rbf', class_weight='balanced')
+        if DATASET == 'kits':
+            params = dict(C=1, gamma=0.1)
+        elif DATASET == 'downtown':
+            params = dict(C=1, gamma=0.01)
+        elif DATASET == 'ptgrey':
+            params = dict(C=0.1, gamma=5.623413251903491)
+        params |= dict(kernel='rbf', class_weight='balanced')
+
         train_eval_large(
             model=SVC,
             model_name='SVM',
@@ -793,9 +804,14 @@ def run_large():
     ###################################################################################################################
 
     if MODELS is None or '1' in MODELS:
-        params = dict(
-            B=2, P=0, K=3, zeta=0.8, gamma=0.1, kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True
-        )
+        if DATASET == 'kits':
+            params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.1)
+        elif DATASET == 'downtown':
+            params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.01)
+        elif DATASET == 'ptgrey':
+            params = dict(B=2, P=2, K=4, zeta=1.2, gamma=1.7782794100389228)
+        params |= dict(kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True)
+
         train_eval_large(
             model=QSVM,
             model_name='QSVM',
@@ -813,10 +829,18 @@ def run_large():
     ###################################################################################################################
 
     if MODELS is None or '2' in MODELS:
-        qsvm_group_params = dict(S=50, M=20, multiplier=10.0, balance_classes=True, num_workers=num_qsvm_group_workers)
-        qsvm_params = dict(
-            B=2, P=0, K=3, zeta=0.8, gamma=1.0, kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True
-        )
+        if DATASET == 'kits':
+            qsvm_group_params = dict(S=50, M=20, multiplier=10.0)
+            qsvm_params = dict(B=2, P=0, K=3, zeta=0.8, gamma=1.0)
+        elif DATASET == 'downtown':
+            qsvm_group_params = dict(S=50, M=20, multiplier=10.0)
+            qsvm_params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.1)
+        elif DATASET == 'ptgrey':
+            qsvm_group_params = dict(S=50, M=20, multiplier=10.0)
+            qsvm_params = dict(B=2, P=0, K=6, zeta=1.2, gamma=5.623413251903491)
+        qsvm_group_params |= dict(balance_classes=True, num_workers=num_qsvm_group_workers)
+        qsvm_params |= dict(kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True)
+
         train_eval_large(
             model=QSVMGroup,
             model_name='QSVM Group',
@@ -835,8 +859,17 @@ def run_large():
     ###################################################################################################################
 
     if MODELS is None or '3' in MODELS:
-        kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-        params = dict(C=1, kernel=kernel, class_weight='balanced')
+        if DATASET == 'kits':
+            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+            params = dict(C=1, kernel=kernel)
+        elif DATASET == 'downtown':
+            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+            params = dict(C=1, kernel=kernel)
+        elif DATASET == 'ptgrey':
+            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='linear')
+            params = dict(C=10, kernel=kernel)
+        params |= dict(class_weight='balanced')
+
         train_eval_large(
             model=SVC,
             model_name='SVM with Quantum Kernel',
@@ -854,10 +887,17 @@ def run_large():
     ###################################################################################################################
 
     if MODELS is None or '4' in MODELS:
-        kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-        params = dict(
-            B=2, P=0, K=3, zeta=0.8, kernel=kernel, sampler='steepest_descent', num_reads=100, normalize=True
-        )
+        if DATASET == 'kits':
+            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+            params = dict(B=2, P=0, K=3, zeta=0.8, kernel=kernel)
+        elif DATASET == 'downtown':
+            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+            params = dict(B=2, P=0, K=3, zeta=0.8, kernel=kernel)
+        elif DATASET == 'ptgrey':
+            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
+            params = dict(B=2, P=1, K=3, zeta=0.4, kernel=kernel)
+        params |= dict(sampler='steepest_descent', num_reads=100, normalize=True)
+
         train_eval_large(
             model=QSVM,
             model_name='QSVM with Quantum Kernel',
@@ -871,28 +911,22 @@ def run_large():
         )
 
     ###################################################################################################################
-    # Weak Classifiers ################################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '5' in MODELS or '6' in MODELS:
-        weak_classifiers = train_weak_classifiers(
-            train_x=train_x, train_y=train_y, SM=[(50, 20)], balance_classes=True, verbose=verbose
-        )[0]
-
-    ###################################################################################################################
     # QBoost ##########################################################################################################
     ###################################################################################################################
 
     if MODELS is None or '5' in MODELS:
-        params = dict(
-            B=2,
-            P=0,
-            K=3,
-            weak_classifiers=weak_classifiers,
-            lbda=(0.0, 2.1, 0.1),
-            sampler='steepest_descent',
-            num_reads=100,
-        )
+        train_args = dict(train_x=train_x, train_y=train_y, balance_classes=True, verbose=verbose)
+        if DATASET == 'kits':
+            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
+            params = dict(B=2, P=0, K=3, weak_classifiers=weak_classifiers)
+        elif DATASET == 'downtown':
+            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
+            params = dict(B=2, P=0, K=3, weak_classifiers=weak_classifiers)
+        elif DATASET == 'ptgrey':
+            weak_classifiers = train_weak_classifiers(SM=[(40, 40)], **train_args)[0]
+            params = dict(B=2, P=1, K=7, weak_classifiers=weak_classifiers)
+        params |= dict(lbda=(0.0, 2.1, 0.1), sampler='steepest_descent', num_reads=100)
+
         train_eval_large(
             model=QBoost,
             model_name='QBoost',
@@ -910,7 +944,17 @@ def run_large():
     ###################################################################################################################
 
     if MODELS is None or '6' in MODELS:
-        params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
+        train_args = dict(train_x=train_x, train_y=train_y, balance_classes=True, verbose=verbose)
+        if DATASET == 'kits':
+            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
+            params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
+        elif DATASET == 'downtown':
+            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
+            params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
+        elif DATASET == 'ptgrey':
+            weak_classifiers = train_weak_classifiers(SM=[(40, 40)], **train_args)[0]
+            params = dict(n_estimators=30, weak_classifiers=weak_classifiers)
+
         train_eval_large(
             model=AdaBoost,
             model_name='AdaBoost',
@@ -932,10 +976,12 @@ if __name__ == '__main__':
     assert DATASET in ('kits', 'downtown', 'ptgrey')
 
     WORKING_DIR = Path(__file__).parent
-    LOG_DIR = WORKING_DIR / f'logs_{DATASET}'
+    HPO_LOG_DIR = WORKING_DIR / 'logs' / f'hpo_logs_{DATASET}'
+    LARGE_LOG_DIR = WORKING_DIR / 'logs' / f'large_logs_{DATASET}'
 
     MODELS = sys.argv[2] if len(sys.argv) > 2 else None
 
     SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
 
-    hpo()
+    # hpo()
+    run_large()
