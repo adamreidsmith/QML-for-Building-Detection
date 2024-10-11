@@ -116,6 +116,8 @@ class QSVM(ClassifierMixin, BaseEstimator):
         'multi_class_strategy': [Options(str, {'ovo', 'ovr'})],  # valid string options
         'dwave_api_token': [str, None],
         'threshold': [Interval(numbers.Real, 0.0, None, closed='left')],  # non-negative float
+        'threshold_strategy': [Options(str, {'absolute', 'relative'})],  # valid string options
+        'optimize_memory': ['boolean'],  # boolean
         'verbose': ['boolean', Interval(numbers.Integral, 0, None, closed='left')],  # boolean or non-negative integer
     }
 
@@ -136,6 +138,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         multi_class_strategy: str = 'ovo',
         dwave_api_token: Optional[str] = None,
         threshold: float = 0.0,
+        threshold_strategy: str = 'absolute',
         optimize_memory: bool = True,
         verbose: bool | int = False,
     ) -> None:
@@ -190,6 +193,11 @@ class QSVM(ClassifierMixin, BaseEstimator):
         threshold : float
             A threshold to use in the QSVM QUBO model.  Biases and coupling strengths with absolute value below this
             threshold are set to zero to reduce the size of the QUBO and speed up computation. Default is 0.0.
+        threshold_strategy : str
+            The strategy to use when setting the threshold. One of 'absolute' or 'relative'. 'absolute' sets all QUBO
+            elements with absolute value less than `threshold` to zero. 'relative' sets the smallest
+            `num_nonzero_qubo_elements * threshold` QUBO elements to zero. 'relative' is not available when
+            `optimize_memory=True`. Default is 'absolute'.
         optimize_memory : bool
             Whether or not to optimize the memory usage at the expense of computation time. Default is True.
         verbose : bool | int
@@ -217,6 +225,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         self.multi_class_strategy = multi_class_strategy
         self.dwave_api_token = dwave_api_token
         self.threshold = threshold
+        self.threshold_strategy = threshold_strategy
         self.optimize_memory = optimize_memory
         self.verbose = verbose
 
@@ -365,13 +374,15 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         self._logger.info('Defining kernel function')
         self.kernel_func_2D_, self.kernel_func_1D_ = self._define_kernel()
-        if not self.optimize_memory:
+        if self.optimize_memory:
+            if self.threshold_strategy == 'relative':
+                raise ValueError('Relative threshold strategy not available when optimize_memory=True')
+            self._logger.info('Optimizing memory usage, computing kernel and QUBO elements on-the-fly')
+        else:
             self._logger.info('Not optimizing memory usage, computing kernel matrix')
             self.computed_kernel_ = self.kernel_func_2D_(self.X_, self.X_)
             self._logger.info('Not optimizing memory usage, computing QUBO matrix')
             self.qubo_ = self._compute_qubo_fast()
-        else:
-            self._logger.info('Optimizing memory usage, computing kernel and QUBO elements on-the-fly')
 
         self._logger.info('Running sampler')
         sample = self._run_sampler()
@@ -380,6 +391,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         self._logger.info('Computing bias')
         self.bias_ = self._compute_bias()
         self._logger.info('Fitting process complete')
+
         return self
 
     def _binarize_y(self, y: np.ndarray, reverse: bool = False) -> np.ndarray:
@@ -467,9 +479,9 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         self._logger.info('QUBO matrix computed')
         self._logger.info(
-            f'Number of upper triangular elements: {qubo_array.shape[0] * (qubo_array.shape[0] + 1) / 2}'
+            f'Number of upper triangular elements: {qubo_array.shape[0] * (qubo_array.shape[0] + 1) / 2:_}'
         )
-        self._logger.info(f'Number of non-zero elements: {np.count_nonzero(qubo_array)}')
+        self._logger.info(f'Number of non-zero elements: {np.count_nonzero(qubo_array):_}')
 
         return qubo_array
 
@@ -479,15 +491,13 @@ class QSVM(ClassifierMixin, BaseEstimator):
         indices of the binary variables to their values.
         '''
 
-        qubo_generator = self._qubo_generator() if self.optimize_memory else None
-
         if self.sampler == 'hybrid':
             self._logger.info('Running hybrid sampler')
-            return retry(self._run_hybrid_sampler, max_retries=2, delay=1, warn=True, qubo_generator=qubo_generator)
+            return retry(self._run_hybrid_sampler, max_retries=2, delay=1, warn=True)
         self._logger.info('Running pure sampler')
-        return retry(self._run_pure_sampler, max_retries=2, delay=1, warn=True, qubo_generator=qubo_generator)
+        return retry(self._run_pure_sampler, max_retries=2, delay=1, warn=True)
 
-    def _run_pure_sampler(self, qubo_generator: Optional[Iterator[tuple[tuple[int, int], float]]]) -> dict[int, int]:
+    def _run_pure_sampler(self) -> dict[int, int]:
         '''
         Run a purely quantum or classical sampling method on the QUBO.
         '''
@@ -510,9 +520,9 @@ class QSVM(ClassifierMixin, BaseEstimator):
         else:
             raise ValueError(f'Unknown pure sampler: {self.sampler}')
 
-        return self._run_from_sampler(sampler, qubo_generator, dict(num_reads=self.num_reads))
+        return self._run_from_sampler(sampler, dict(num_reads=self.num_reads))
 
-    def _run_hybrid_sampler(self, qubo_generator: Optional[Iterator[tuple[tuple[int, int], float]]]) -> dict[int, int]:
+    def _run_hybrid_sampler(self) -> dict[int, int]:
         '''
         Run the Leap hybrid sampler on the QUBO.
         '''
@@ -520,54 +530,90 @@ class QSVM(ClassifierMixin, BaseEstimator):
         if self._hybrid_sampler is None:
             self._logger.info('Initializing LeapHybridSampler')
             self._set_hybrid_sampler()
-        return self._run_from_sampler(self._hybrid_sampler, qubo_generator, dict(time_limit=self.hybrid_time_limit))
+        return self._run_from_sampler(self._hybrid_sampler, dict(time_limit=self.hybrid_time_limit))
 
     def _run_from_sampler(
         self,
         sampler: dimod.Sampler,
-        qubo_generator: Optional[Iterator[tuple[tuple[int, int], float]]],
         sampler_kwargs: dict[str, Any],
     ) -> dict[int, int]:
         '''
-        Run a given sampler on the QUBO.
+        Threshold the qubo and run a given sampler on the QUBO.
         '''
 
-        n_rejected = n_accepted = 0
-        if qubo_generator is not None:
-            # Generate the BQM from the QUBO elements
-            self._logger.info('Generating BQM from QUBO elements')
-            bqm = BinaryQuadraticModel(vartype=dimod.BINARY, dtype=np.float32)
-            for (u, v), bias in qubo_generator:
-                if (b := abs(bias)) < self.threshold:
-                    n_rejected += b > 0
-                    continue
-                n_accepted += 1
-                if u == v:
-                    bqm.add_linear(u, bias)
-                else:
-                    bqm.add_quadratic(u, v, bias)
-
-            self._logger.info(f'{n_rejected:_} QUBO elements rejected by threshold')
-            self._logger.info(f'{n_accepted:_} QUBO elements accepted by threshold')
-
+        if self.optimize_memory:
+            bqm = self._generate_thresholded_bqm()
             self._logger.info('Submitting BQM to sampler')
             sample_set = sampler.sample(bqm, **sampler_kwargs)
             self._logger.info('Sample set received from sampler')
-
         else:
-            qubo_lt_thres = np.abs(self.qubo_) < self.threshold
-            n_rejected = ((np.abs(self.qubo_) > 0) & qubo_lt_thres).sum()
-            n_accepted = (np.abs(self.qubo_) >= self.threshold).sum()
-            self._logger.info(f'{n_rejected:_} QUBO elements rejected by threshold')
-            self._logger.info(f'{n_accepted:_} QUBO elements accepted by threshold')
-
-            self.qubo_[qubo_lt_thres] = 0
-
+            qubo_thres = self._compute_thresholded_qubo()
             self._logger.info('Submitting QUBO to sampler')
-            sample_set = sampler.sample_qubo(self.qubo_, **sampler_kwargs)
+            sample_set = sampler.sample_qubo(qubo_thres, **sampler_kwargs)
             self._logger.info('Sample set received from sampler')
 
         return sample_set.first.sample
+
+    def _generate_thresholded_bqm(self) -> BinaryQuadraticModel:
+        '''
+        Build a BQM while thresholding QUBO elements on-the-fly to save memory.
+        '''
+
+        self.n_rejected_ = self.n_accepted_ = 0
+        self._logger.info('Generating BQM from QUBO elements')
+        bqm = BinaryQuadraticModel(vartype=dimod.BINARY, dtype=np.float32)
+        for (u, v), bias in self._qubo_generator():
+            if (b := abs(bias)) < self.threshold:
+                self.n_rejected_ += b > 0
+                continue
+            self.n_accepted_ += 1
+            if u == v:
+                bqm.add_linear(u, bias)
+            else:
+                bqm.add_quadratic(u, v, bias)
+
+        self._logger.info(f'{self.n_rejected_:_} QUBO elements rejected by threshold')
+        self._logger.info(f'{self.n_accepted_:_} QUBO elements accepted by threshold')
+        return bqm
+
+    def _compute_thresholded_qubo(self) -> np.ndarray:
+        '''
+        Explicitly compute the thresholded QUBO matrix.
+        '''
+
+        if self.threshold > 0:
+            if self.threshold_strategy == 'absolute':
+                self._logger.info('Thresholding QUBO elements using absolute strategy')
+                qubo_lt_thres = np.abs(self.qubo_) < self.threshold
+                self.n_rejected_ = ((np.abs(self.qubo_) > 0) & qubo_lt_thres).sum()
+                self.n_accepted_ = (~qubo_lt_thres).sum()
+                qubo_thres = np.where(qubo_lt_thres, 0, self.qubo_)
+            else:
+                self._logger.info('Thresholding QUBO elements using relative strategy')
+                n_non_zero = np.count_nonzero(self.qubo_)
+                self.n_rejected_ = int(n_non_zero * self.threshold)
+                self.n_accepted_ = n_non_zero - self.n_rejected_
+
+                qubo_thres = self.qubo_.flatten()
+                non_zero_indices = np.nonzero(qubo_thres)[0]
+                non_zero_elements = qubo_thres[non_zero_indices]
+
+                # The k-th element will be in its final sorted position and all smaller elements will be moved before it and all larger elements behind it.
+                # Returns an array of indices that partition a along the specified axis.
+                smallest_indices = np.argpartition(np.abs(non_zero_elements), self.n_rejected_)[: self.n_rejected_]
+
+                qubo_thres[non_zero_indices[smallest_indices]] = 0
+                qubo_thres = qubo_thres.reshape(self.qubo_.shape)
+
+            self._logger.info(f'{self.n_rejected_:_} QUBO elements rejected by threshold')
+            self._logger.info(f'{self.n_accepted_:_} QUBO elements accepted by threshold')
+
+        else:
+            self._logger.info('Threshold is 0, not rejecting any QUBO elements')
+            self._logger.info(f'Number of non-zero QUBO elements: {np.count_nonzero(self.qubo_):_}')
+            qubo_thres = self.qubo_
+
+        return qubo_thres
 
     @classmethod
     def _set_hybrid_sampler(cls) -> None:
