@@ -9,8 +9,6 @@ from qiskit.circuit import ParameterVector
 from qiskit.circuit.library import PauliFeatureMap
 from qiskit.quantum_info import Statevector
 
-from qiskit_machine_learning.kernels import FidelityStatevectorKernel
-
 from utils import LimitedSizeDict
 
 
@@ -78,7 +76,6 @@ class Kernel:
 
         self.fm_name = fm_name
         self.feature_map = feature_map
-        # self.kernel = FidelityStatevectorKernel(feature_map=self.feature_map)
         self.kernel = StatevectorKernel(feature_map=self.feature_map, auto_clear_cache=False, max_cache_size=int(1e6))
 
     def __call__(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> np.ndarray:
@@ -117,7 +114,7 @@ class StatevectorKernel:
     ) -> None:
         '''
         This class is a simplified version of `qiskit_machine_learning.kernels.FidelityStatevectorKernel`
-        that uses a manual cache instead of `functools.lru_cache` for serializability and improves performance.
+        that uses a manual cache instead of `functools.lru_cache` for serializability and improved performance.
 
         Parameters
         ----------
@@ -177,6 +174,8 @@ class StatevectorKernel:
         else:
             kernel_matrix = np.abs(np.dot(x_svs.conj(), y_svs.T)) ** 2
 
+        if kernel_matrix.size == 1:
+            return kernel_matrix.item()
         return kernel_matrix
 
     def _validate_input(self, vec: np.ndarray) -> np.ndarray:
@@ -670,35 +669,12 @@ class PreprocessingQuantumCircuit(QuantumCircuit):
 
 if __name__ == '__main__':
     nf = 4
-    sz = 1000
-    x = np.random.rand(100, nf)
-    y = np.random.rand(100, nf)
+    x = np.random.rand(nf)
+    y = np.random.rand(nf)
 
     fm = data_reuploading_feature_map(nf, 1, 'full')
 
-    fsvk = FidelityStatevectorKernel(feature_map=fm)
     svk = StatevectorKernel(feature_map=fm)
 
     a = svk.evaluate(x, y)
-    b = fsvk.evaluate(x, y)
-
-    print(np.allclose(a, b))
-    print(np.sum(np.abs(a - b)))
-
-    import time
-    from tqdm import tqdm
-
-    n = 20
-    t = time.perf_counter()
-    for _ in tqdm(range(n)):
-        x = np.random.rand(sz, nf)
-        y = np.random.rand(sz, nf)
-        svk.evaluate(x, y)
-    print(time.perf_counter() - t)
-
-    t = time.perf_counter()
-    for _ in tqdm(range(n)):
-        x = np.random.rand(sz, nf)
-        y = np.random.rand(sz, nf)
-        fsvk.evaluate(x, y)
-    print(time.perf_counter() - t)
+    print(a.item())
