@@ -10,6 +10,8 @@ from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 
 import dill
+import matplotlib
+import matplotlib.pyplot
 import numpy as np
 import pandas as pd
 from sklearn.svm import SVC
@@ -810,7 +812,17 @@ def run_large():
             params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.01)
         elif DATASET == 'ptgrey':
             params = dict(B=2, P=2, K=4, zeta=1.2, gamma=1.7782794100389228)
-        params |= dict(kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True)
+
+        params |= dict(
+            kernel='rbf',
+            sampler='steepest_descent',
+            num_reads=100,
+            normalize=True,
+            threshold=0.1,
+            threshold_strategy='relative',
+            optimize_memory=False,
+            verbose=True,
+        )
 
         train_eval_large(
             model=QSVM,
@@ -968,20 +980,116 @@ def run_large():
         )
 
 
+def compute_qsvm_threshold():
+    if SEED is not None:
+        print(f'Using {SEED = }')
+        np.random.seed(SEED)
+
+    # Choose a random subset of points as a train set
+    n_train_samples = 1_000
+    n_valid_samples = 100_000
+
+    features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
+
+    # Best params for the QSVM model
+    if DATASET == 'kits':
+        params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.1)
+    elif DATASET == 'downtown':
+        params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.01)
+    elif DATASET == 'ptgrey':
+        params = dict(B=2, P=2, K=4, zeta=1.2, gamma=1.7782794100389228)
+    params |= dict(
+        kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True, optimize_memory=False, verbose=False
+    )
+
+    # # QUBO coefficients are given by
+    # # \tilde Q_{Kn + k, Km + j} = \frac12 B^{k + j - 2P} y_n y_m (\kappa(\mathbf x_n, \mathbf x_m) + \zeta) - \delta_{nm} \delta_{kj} B^{k - P}
+    # # for k, j in {0, 1, ..., K-1} and n, m in {0, 1, ..., N-1}.
+    # # The RBF, Sigmoid, and Quantum kernels have a maximum of 1, so the max magnitude of the QUBO coefficients is
+    # # 0.5 * B^(2(K - 1) - 2P) * (1 + zeta).
+    # coefs_max = 0.5 * params['B'] ** (2 * (params['K'] - 1) - 2 * params['P']) * (1 + params['zeta'])
+    # print(f'{coefs_max = }')
+
+    n_trials = 100
+    threshold_space = np.geomspace(0.001, 0.9, 30)
+
+    cm_dtype = np.float64
+
+    all_n_accepted = np.empty((n_trials, len(threshold_space)), dtype=int)
+    all_n_rejected = np.empty((n_trials, len(threshold_space)), dtype=int)
+    all_cms = np.empty((n_trials, len(threshold_space), 4), dtype=cm_dtype)
+
+    for trial in tqdm(range(n_trials)):
+        _, train_x, train_y, valid_x, valid_y, _, _, _, _ = get_data(
+            n_train_samples, n_valid_samples, features, False, False
+        )
+
+        n_accepted, n_rejected = np.empty(len(threshold_space), dtype=int), np.empty(len(threshold_space), dtype=int)
+        cms = np.empty((len(threshold_space), 4), dtype=cm_dtype)
+
+        for i, threshold in enumerate(threshold_space):
+            params['threshold'] = threshold
+            params['threshold_strategy'] = 'relative'
+
+            qsvm = QSVM(**params)
+            qsvm.fit(train_x, train_y)
+
+            n_rejected[i] = qsvm.n_rejected_
+            n_accepted[i] = qsvm.n_accepted_
+
+            cms[i] = confusion_matrix(qsvm.predict(valid_x), valid_y).astype(cm_dtype)
+
+        all_n_accepted[trial] = n_accepted
+        all_n_rejected[trial] = n_rejected
+        all_cms[trial] = cms
+
+    with open(LOG_DIR / f'threshold_analysis_{DATASET}.pkl', 'wb') as f:
+        dill.dump((threshold_space, all_n_accepted, all_n_rejected, all_cms), f)
+
+
+def analyze_qsvm_threshold():
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure()
+    threshold_space = np.geomspace(0.00316228, 0.7498942, 20)
+    for dataset in ('kits', 'downtown', 'ptgrey'):
+        try:
+            with open(LOG_DIR / f'threshold_analysis_{dataset}.pkl', 'rb') as f:
+                threshold_space, n_accepted, n_rejected, cms = dill.load(f)
+        except FileNotFoundError:
+            continue
+
+    #     n_accepted = np.asarray(n_accepted)
+    #     n_rejected = np.asarray(n_rejected)
+    #     n_total = n_accepted + n_rejected
+
+    #     mccs = [matthews_corrcoef(cm) for cm in cms]
+    #     # plt.scatter(n_rejected / n_total, mccs, label=dataset.capitalize())
+    #     plt.scatter(threshold_space, mccs, label=dataset.capitalize())
+
+    # plt.xscale('log')
+    # plt.legend()
+    # plt.show()
+
+
 if __name__ == '__main__':
     # Set DWave API token
     load_dotenv()
 
-    DATASET = sys.argv[1]
-    assert DATASET in ('kits', 'downtown', 'ptgrey')
+    DATASET = sys.argv[1] if len(sys.argv) > 1 else None
+    assert DATASET is None or DATASET in ('kits', 'downtown', 'ptgrey')
 
     WORKING_DIR = Path(__file__).parent
-    HPO_LOG_DIR = WORKING_DIR / 'logs' / f'hpo_logs_{DATASET}'
-    LARGE_LOG_DIR = WORKING_DIR / 'logs' / f'large_logs_{DATASET}'
+    LOG_DIR = WORKING_DIR / 'logs'
+    if DATASET is not None:
+        HPO_LOG_DIR = LOG_DIR / f'hpo_logs_{DATASET}'
+        LARGE_LOG_DIR = LOG_DIR / f'large_logs_{DATASET}'
 
     MODELS = sys.argv[2] if len(sys.argv) > 2 else None
 
     SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
 
     # hpo()
-    run_large()
+    # run_large()
+    compute_qsvm_threshold()
+    # analyze_qsvm_threshold()
