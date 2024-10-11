@@ -134,7 +134,7 @@ class StatevectorKernel:
         self.clear_cache()
         self._statevector_cache: LimitedSizeDict
 
-    def evaluate(self, x_vec: np.ndarray, y_vec: Optional[np.ndarray] = None) -> np.ndarray:
+    def evaluate(self, x_vec: np.ndarray, y_vec: Optional[np.ndarray] = None) -> np.ndarray | float:
         '''
         Evaluate the kernel. That is, compute |<φ(x)|φ(y)>|^2 where φ is the feature map.
 
@@ -150,8 +150,9 @@ class StatevectorKernel:
 
         Returns
         -------
-        np.ndarray
+        np.ndarray | float
             The kernel matrix of size (x_vec.shape[0], y_vec.shape[0]).
+            If x_vec and y_vec are 1D, return a float.
         '''
 
         if self.auto_clear_cache:
@@ -669,12 +670,12 @@ class PreprocessingQuantumCircuit(QuantumCircuit):
 
 if __name__ == '__main__':
     nf = 4
-    x = np.random.rand(nf)
-    y = np.random.rand(nf)
+    x = np.random.rand(10, nf)
+    y = np.random.rand(10, nf)
 
     fm = data_reuploading_feature_map(nf, 1, 'full')
 
     svk = StatevectorKernel(feature_map=fm)
 
     a = svk.evaluate(x, y)
-    print(a.item())
+    print(a)
