@@ -1,5 +1,4 @@
 import math
-import time
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -10,8 +9,6 @@ from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 
 import dill
-import matplotlib
-import matplotlib.pyplot
 import numpy as np
 import pandas as pd
 from sklearn.svm import SVC
@@ -20,7 +17,7 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 
 from qsvm import QSVM
-from qsvm_group import QSVMGroup
+from softmax_qsvm import SoftmaxQSVM
 from qboost import QBoost
 from adaboost import AdaBoost
 from quantum_kernels import (
@@ -90,6 +87,10 @@ def cross_validation(
     seed: Optional[int] = None,
     num_workers: int = 5,
 ) -> np.ndarray[int]:
+    '''
+    Apply k-fold cross validation to the model.
+    '''
+
     kf = KFold(n_splits=k, shuffle=True, random_state=seed)
 
     if num_workers > 1:
@@ -132,10 +133,10 @@ def optimize_model(
     model_name: str = '',
     verbose: bool = True,
     visualize: bool = True,
-    model_kw_params: Optional[dict[str, Any]] = None,
     predict_full_dataset: bool = True,
     score_valid: bool = False,
     write_data: bool = True,
+    validate_qboost_w_train: bool = False,
 ) -> Any:
     if verbose:
         print(f'Optimizing {model_name} model...')
@@ -150,20 +151,15 @@ def optimize_model(
         total=math.prod(len(x) for x in search_space.values()),
         disable=not verbose,
     ):
-        # QSVM Group model is initialized diffrently to the others
-        if model == QSVMGroup:
-            multiplier, SM = params.pop('multiplier'), params.pop('SM')
-            clf = model(params | kw_params, **model_kw_params, multiplier=multiplier, S=SM[0], M=SM[1])
-            params['multiplier'], params['SM'] = multiplier, SM
-        else:
-            clf = model(**params, **kw_params)
+        # Instantiate the model
+        clf = model(**params, **kw_params)
 
         # If we are only using one fold, do not use cross-validation
         if k_folds == 1:
             # The fit method for QBoost takes validation data as well
             (
                 clf.fit(x_train, y_train, x_valid[: len(x_train)], y_valid[: len(x_train)])
-                if model == QBoost
+                if model == QBoost and not validate_qboost_w_train
                 else clf.fit(x_train, y_train)
             )
             preds = clf.predict(x_valid) if score_valid else clf.predict(x_train)
@@ -171,7 +167,7 @@ def optimize_model(
         else:
             # The fit method for QBoost takes validation data as well
             fit_args = dict(x_train=x_train, y_train=y_train)
-            if model == QBoost:
+            if model == QBoost and not validate_qboost_w_train:
                 fit_args |= dict(x_valid=x_valid[: len(x_train)], y_valid=y_valid[: len(x_train)])
             # Fit using cross validation
             cm = cross_validation(model=clf, k=k_folds, **fit_args, num_workers=num_cv_workers)
@@ -186,7 +182,7 @@ def optimize_model(
 
         # Write results to a file
         if write_data:
-            if model in [QBoost, AdaBoost]:
+            if model in [SoftmaxQSVM, QBoost, AdaBoost]:
                 params_to_print = deepcopy(params)
                 weak_classifiers = params_to_print.pop('weak_classifiers')
                 params_to_print['S'] = len(weak_classifiers)
@@ -205,15 +201,10 @@ def optimize_model(
             print(f'\t{params | kw_params}')
 
     # Define and train the best classifier on the whole training set
-    if model == QSVMGroup:
-        multiplier, SM = param_sets[0].pop('multiplier'), param_sets[0].pop('SM')
-        best_clf = model(param_sets[0] | kw_params, **model_kw_params, multiplier=multiplier, S=SM[0], M=SM[1])
-        param_sets[0]['multiplier'], param_sets[0]['SM'] = multiplier, SM
-    else:
-        best_clf = model(**param_sets[0], **kw_params)
+    best_clf = model(**param_sets[0], **kw_params)
     (
         best_clf.fit(x_train, y_train, x_valid[: len(x_train)], y_valid[: len(x_train)])
-        if model == QBoost
+        if model == QBoost and not validate_qboost_w_train
         else best_clf.fit(x_train, y_train)
     )
 
@@ -240,7 +231,7 @@ def optimize_model(
     return clf
 
 
-def train_weak_classifiers(
+def train_weak_classifiers_hpo(
     train_x: np.ndarray,
     train_y: np.ndarray,
     SM: list[tuple[int, int]],
@@ -253,11 +244,11 @@ def train_weak_classifiers(
     weak_classifiers = []
     for S, M in SM:
         # Split the training data into `n_weak_classifiers` random subsets of size `samples_per_classifier`.
-        # Use a QSVMGroup to accomplish this.
-        qsvm_group = QSVMGroup({}, S=S, M=M, balance_classes=balance_classes, multiplier=1.0)
-        qsvm_group._define_data_subsets(train_x, train_y)
-        train_x_split = qsvm_group._x_subsets
-        train_y_split = qsvm_group._y_subsets
+        # Use a SoftmaxQSVM to accomplish this.
+        softmax_qsvm = SoftmaxQSVM(None, {}, S=S, M=M, balance_classes=balance_classes, multiplier=1.0)
+        softmax_qsvm._define_data_subsets(train_x, train_y)
+        train_x_split = softmax_qsvm._x_subsets
+        train_y_split = softmax_qsvm._y_subsets
 
         if verbose:
             print(f'Optimizing {S} classifiers with {M} samples per classifier...')
@@ -295,16 +286,22 @@ def train_weak_classifiers(
 
 
 def get_data(
-    n_train_samples: int, n_valid_samples: int, features: list[str], verbose: bool, visualize: bool
+    n_train_samples: int,
+    n_valid_samples: int,
+    features: list[str],
+    verbose: bool,
+    visualize: bool,
+    dataset: str,
+    working_dir: Path,
 ) -> tuple[
     pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
 ]:
-    if DATASET == 'kits':
-        data_file = WORKING_DIR / 'data' / '4870E_54560N_kits' / '1m_lidar.csv'
-    elif DATASET == 'downtown':
-        data_file = WORKING_DIR / 'data' / '491000_5458000_downtown' / '1m_lidar.csv'
-    elif DATASET == 'ptgrey':
-        data_file = WORKING_DIR / 'data' / '483000_5457000_ptgrey' / '1m_lidar.csv'
+    if dataset == 'kits':
+        data_file = working_dir / 'data' / '4870E_54560N_kits' / '1m_lidar.csv'
+    elif dataset == 'downtown':
+        data_file = working_dir / 'data' / '491000_5458000_downtown' / '1m_lidar.csv'
+    elif dataset == 'ptgrey':
+        data_file = working_dir / 'data' / '483000_5457000_ptgrey' / '1m_lidar.csv'
     point_cloud = pd.read_csv(data_file)
 
     if n_train_samples + n_valid_samples > len(point_cloud):
@@ -314,26 +311,20 @@ def get_data(
 
     # Map building points to 1 and all others to -1
     point_cloud.classification = point_cloud.classification.map(lambda x: 1 if x == 6 else -1)
-    # visualize_cloud(
-    #     # np.hstack((point_cloud[['x', 'y']].to_numpy(), np.zeros((len(point_cloud), 1)))),
-    #     point_cloud[['x', 'y', 'z']].to_numpy(),
-    #     colors=point_cloud.z.to_numpy(),
-    #     cmap='viridis',
-    # )
 
     if verbose:
         value_counts = point_cloud.classification.value_counts()
         print(
             'Point cloud:'
-            f'\n\tTotal # points:        {len(point_cloud)}'
-            f'\n\t# building points:     {value_counts.get(1, None)}'
-            f'\n\t# non-building points: {value_counts.get(-1, None)}'
+            f'\n\tTotal # points:        {len(point_cloud):_}'
+            f'\n\t# building points:     {value_counts.get(1, None):_}'
+            f'\n\t# non-building points: {value_counts.get(-1, None):_}'
         )
 
-    pc = downsample_point_cloud(point_cloud, factor=0.25, keep_max=True) if DATASET == 'ptgrey' else point_cloud
+    pc = downsample_point_cloud(point_cloud, factor=9 / 16, keep_max=True) if dataset == 'ptgrey' else point_cloud
+
     train_y = np.empty(0)
-    # Ensure we have sufficiently many building points in the train set
-    while len(train_y[train_y == 1]) < n_train_samples / 20:
+    while -1 not in train_y or 1 not in train_y:
         indices = np.arange(len(pc))
         np.random.shuffle(indices)
         train_indices = indices[:n_train_samples]
@@ -363,9 +354,7 @@ def get_data(
         )
 
     if visualize:
-        visualize_cloud(
-            point_cloud[['x', 'y', 'z']].to_numpy(), colors=point_cloud.classification.to_numpy(), cmap='cool'
-        )
+        visualize_cloud(pc[['x', 'y', 'z']].to_numpy(), colors=pc.classification.to_numpy(), cmap='cool')
 
     return (
         point_cloud,
@@ -388,7 +377,7 @@ def hpo():
     predict_full_dataset = False
     verbose = True
     visualize = False
-    num_qsvm_group_workers = 4
+    num_softmax_qsvm_workers = 4
     write_data = True
     k_folds = 3
     num_cv_workers = 3
@@ -400,7 +389,7 @@ def hpo():
     features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
 
     point_cloud, train_x, train_y, valid_x, valid_y, train_x_normalized, valid_x_normalized, train_mean, train_std = (
-        get_data(n_train_samples, n_valid_samples, features, verbose, visualize)
+        get_data(n_train_samples, n_valid_samples, features, verbose, visualize, DATASET, WORKING_DIR)
     )
 
     ###################################################################################################################
@@ -427,7 +416,6 @@ def hpo():
             model_name='SVM',
             verbose=verbose,
             visualize=visualize,
-            model_kw_params=None,
             predict_full_dataset=predict_full_dataset,
             score_valid=False,
             write_data=write_data,
@@ -463,55 +451,6 @@ def hpo():
             model_name='QSVM',
             verbose=verbose,
             visualize=visualize,
-            model_kw_params=None,
-            predict_full_dataset=predict_full_dataset,
-            score_valid=False,
-            write_data=write_data,
-        )
-
-    ###################################################################################################################
-    # QSVM Group ######################################################################################################
-    ###################################################################################################################
-
-    # QSVM Group hyperparameters
-    SM = [(20, 50), (50, 20), (40, 40)]  # (Number of classifiers, Size of subsets)
-    balance_classes = True
-
-    if MODELS is None or '2' in MODELS:
-        model_kw_params = {'balance_classes': balance_classes, 'num_workers': num_qsvm_group_workers}
-        qsvm_group_search_space = {
-            'B': [2],
-            'P': [0, 1],
-            'K': [4, 5, 6],
-            'zeta': [0.0, 0.4, 0.8, 1.2],
-            'gamma': np.geomspace(0.1, 10 ** (3 / 4), 8),  # np.geomspace(0.01, 10, 13),
-            'multiplier': np.geomspace(0.1, 10, 5),
-            'SM': SM,
-        }
-        qsvm_group_kw_params = {
-            'kernel': 'rbf',
-            'sampler': 'steepest_descent',
-            'num_reads': 100,
-            'normalize': True,
-        }
-
-        optimize_model(
-            model=QSVMGroup,
-            search_space=qsvm_group_search_space,
-            kw_params=qsvm_group_kw_params,
-            x_train=train_x,
-            y_train=train_y,
-            x_valid=valid_x,
-            y_valid=valid_y,
-            x_all=point_cloud[features].to_numpy(),
-            y_all=point_cloud.classification.to_numpy(),
-            k_folds=k_folds,
-            num_cv_workers=num_cv_workers,
-            point_cloud=point_cloud,
-            model_name='QSVM Group',
-            verbose=verbose,
-            visualize=visualize,
-            model_kw_params=model_kw_params,
             predict_full_dataset=predict_full_dataset,
             score_valid=False,
             write_data=write_data,
@@ -521,7 +460,7 @@ def hpo():
     # SVM w/ Quantum Kernel ###########################################################################################
     ###################################################################################################################
 
-    if MODELS is None or '3' in MODELS or '4' in MODELS:
+    if MODELS is None or '2' in MODELS or '3' in MODELS:
         n_features = 4
 
         if verbose:
@@ -564,7 +503,7 @@ def hpo():
                 )
             )
 
-    if MODELS is None or '3' in MODELS:
+    if MODELS is None or '2' in MODELS:
         kernel_svm_search_space = {'C': np.geomspace(0.01, 10, 13), 'kernel': kernels}
         kernel_svm_kw_params = {'class_weight': 'balanced'}
 
@@ -584,7 +523,6 @@ def hpo():
             model_name='Quantum Kernel SVM',
             verbose=verbose,
             visualize=visualize,
-            model_kw_params=None,
             predict_full_dataset=predict_full_dataset,
             score_valid=False,
             write_data=write_data,
@@ -594,7 +532,7 @@ def hpo():
     # QSVM w/ Quantum Kernels #########################################################################################
     ###################################################################################################################
 
-    if MODELS is None or '4' in MODELS:
+    if MODELS is None or '3' in MODELS:
         kernel_qsvm_search_space = {
             'B': [2],
             'P': [0, 1],
@@ -620,7 +558,6 @@ def hpo():
             model_name='Quantum Kernel QSVM',
             verbose=verbose,
             visualize=visualize,
-            model_kw_params=None,
             predict_full_dataset=predict_full_dataset,
             score_valid=False,
             write_data=write_data,
@@ -630,8 +567,44 @@ def hpo():
     # Weak Classifiers ################################################################################################
     ###################################################################################################################
 
-    if MODELS is None or '5' in MODELS or '6' in MODELS:
-        weak_classifiers = train_weak_classifiers(train_x, train_y, SM, balance_classes, verbose)
+    # Ensemble hyperparameters
+    SM = [(20, 50), (50, 20), (40, 40)]  # (Number of classifiers, Size of subsets)
+    balance_classes = True
+
+    if MODELS is None or '4' in MODELS or '5' in MODELS or '6' in MODELS:
+        weak_classifiers = train_weak_classifiers_hpo(train_x, train_y, SM, balance_classes, verbose)
+
+    ###################################################################################################################
+    # Softmax QSVM ####################################################################################################
+    ###################################################################################################################
+
+    if MODELS is None or '4' in MODELS:
+        softmax_qsvm_kw_params = {'num_workers': num_softmax_qsvm_workers}
+        softmax_qsvm_search_space = {
+            'multiplier': np.geomspace(0.1, 10, 5),
+            'weak_classifiers': weak_classifiers,
+        }
+
+        optimize_model(
+            model=SoftmaxQSVM,
+            search_space=softmax_qsvm_search_space,
+            kw_params=softmax_qsvm_kw_params,
+            x_train=train_x,
+            y_train=train_y,
+            x_valid=valid_x,
+            y_valid=valid_y,
+            x_all=point_cloud[features].to_numpy(),
+            y_all=point_cloud.classification.to_numpy(),
+            k_folds=k_folds,
+            num_cv_workers=num_cv_workers,
+            point_cloud=point_cloud,
+            model_name='Softmax QSVM',
+            verbose=verbose,
+            visualize=visualize,
+            predict_full_dataset=predict_full_dataset,
+            score_valid=False,
+            write_data=write_data,
+        )
 
     ###################################################################################################################
     # QBoost ##########################################################################################################
@@ -662,10 +635,10 @@ def hpo():
             model_name='QBoost',
             verbose=verbose,
             visualize=visualize,
-            model_kw_params=None,
             predict_full_dataset=predict_full_dataset,
             score_valid=False,
             write_data=write_data,
+            validate_qboost_w_train=True,
         )
 
     ###################################################################################################################
@@ -692,290 +665,8 @@ def hpo():
             model_name='AdaBoost',
             verbose=verbose,
             visualize=visualize,
-            model_kw_params=None,
             predict_full_dataset=predict_full_dataset,
             score_valid=False,
-            write_data=write_data,
-        )
-
-
-def train_eval_large(
-    model: Any,
-    model_name: str,
-    params: dict[str, Any],
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_valid: np.ndarray,
-    y_valid: np.ndarray,
-    verbose: bool,
-    write_data: bool,
-    qsvm_group_params: Optional[dict[str, Any]] = None,
-) -> Any:
-    if model == QSVMGroup:
-        clf = model(params, **qsvm_group_params)
-    else:
-        clf = model(**params)
-
-    if verbose:
-        print(f'Fitting {model_name} on {len(x_train):_} points...')
-
-    # The fit method for QBoost takes validation data as well
-    fit_args = [x_train, y_train]
-    if model == QBoost:
-        fit_args += [x_valid[: len(x_train)], y_valid[: len(x_train)]]
-    t_start = time.perf_counter()
-    clf.fit(*fit_args)
-
-    if verbose:
-        print(f'Fit {model_name} in time {time.perf_counter() - t_start:.3f}s')
-        print(f'Evaluating {model_name} on {len(x_valid):_} points...')
-
-    t_start = time.perf_counter()
-    valid_preds = clf.predict(x_valid)
-
-    if verbose:
-        print(f'Evaluated {model_name} in time {time.perf_counter() - t_start:.3f}s')
-        cm = confusion_matrix(valid_preds, y_valid)
-        mcc = matthews_corrcoef(cm)
-        acc = accuracy(cm)
-        f1 = f1_score(cm)
-        print(f'{model_name} validation results:')
-        print(f'\tMCC: {mcc:.4f}   Acc: {acc:.2%}   F1: {f1:.4f}   CM: {list(cm)}')
-
-    if write_data:
-        if verbose:
-            print(f'Writing {model_name} model...')
-        with open(LARGE_LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.plk', 'wb') as f:
-            dill.dump(clf, f)
-        if verbose:
-            print(f'Writing {model_name} predictions...')
-        valid_preds_str = str(list(map(int, valid_preds)))
-        with open(LARGE_LOG_DIR / f'{model_name.lower().replace(" ", "_")}_{SEED}.txt', 'w') as f:
-            f.write(valid_preds_str)
-
-    return clf
-
-
-def run_large():
-    if SEED is not None:
-        print(f'Using {SEED = }')
-        np.random.seed(SEED)
-
-    verbose = True
-    num_qsvm_group_workers = 8
-    write_data = False
-    visualize = False
-
-    # Choose a random subset of points as a train set
-    n_train_samples = 1_000
-    n_valid_samples = 100_000
-
-    features = ['z', 'normal_variation', 'height_variation', 'log_intensity']
-
-    point_cloud, train_x, train_y, valid_x, valid_y, train_x_normalized, valid_x_normalized, train_mean, train_std = (
-        get_data(n_train_samples, n_valid_samples, features, verbose, visualize)
-    )
-
-    ###################################################################################################################
-    # SVM #############################################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '0' in MODELS:
-        if DATASET == 'kits':
-            params = dict(C=1, gamma=0.1)
-        elif DATASET == 'downtown':
-            params = dict(C=1, gamma=0.01)
-        elif DATASET == 'ptgrey':
-            params = dict(C=0.1, gamma=5.623413251903491)
-        params |= dict(kernel='rbf', class_weight='balanced')
-
-        train_eval_large(
-            model=SVC,
-            model_name='SVM',
-            params=params,
-            x_train=train_x_normalized,
-            y_train=train_y,
-            x_valid=valid_x_normalized,
-            y_valid=valid_y,
-            verbose=verbose,
-            write_data=write_data,
-        )
-
-    ###################################################################################################################
-    # QSVM ############################################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '1' in MODELS:
-        if DATASET == 'kits':
-            params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.1)
-        elif DATASET == 'downtown':
-            params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.01)
-        elif DATASET == 'ptgrey':
-            params = dict(B=2, P=2, K=4, zeta=1.2, gamma=1.7782794100389228)
-
-        params |= dict(
-            kernel='rbf',
-            sampler='steepest_descent',
-            num_reads=100,
-            normalize=True,
-            threshold=0.1,
-            threshold_strategy='relative',
-            optimize_memory=False,
-            verbose=True,
-        )
-
-        train_eval_large(
-            model=QSVM,
-            model_name='QSVM',
-            params=params,
-            x_train=train_x,
-            y_train=train_y,
-            x_valid=valid_x,
-            y_valid=valid_y,
-            verbose=verbose,
-            write_data=write_data,
-        )
-
-    ###################################################################################################################
-    # QSVM Group ######################################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '2' in MODELS:
-        if DATASET == 'kits':
-            qsvm_group_params = dict(S=50, M=20, multiplier=10.0)
-            qsvm_params = dict(B=2, P=0, K=3, zeta=0.8, gamma=1.0)
-        elif DATASET == 'downtown':
-            qsvm_group_params = dict(S=50, M=20, multiplier=10.0)
-            qsvm_params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.1)
-        elif DATASET == 'ptgrey':
-            qsvm_group_params = dict(S=50, M=20, multiplier=10.0)
-            qsvm_params = dict(B=2, P=0, K=6, zeta=1.2, gamma=5.623413251903491)
-        qsvm_group_params |= dict(balance_classes=True, num_workers=num_qsvm_group_workers)
-        qsvm_params |= dict(kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True)
-
-        train_eval_large(
-            model=QSVMGroup,
-            model_name='QSVM Group',
-            params=qsvm_params,
-            x_train=train_x,
-            y_train=train_y,
-            x_valid=valid_x,
-            y_valid=valid_y,
-            verbose=verbose,
-            write_data=write_data,
-            qsvm_group_params=qsvm_group_params,
-        )
-
-    ###################################################################################################################
-    # SVM w/ Quantum Kernel ###########################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '3' in MODELS:
-        if DATASET == 'kits':
-            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-            params = dict(C=1, kernel=kernel)
-        elif DATASET == 'downtown':
-            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-            params = dict(C=1, kernel=kernel)
-        elif DATASET == 'ptgrey':
-            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='linear')
-            params = dict(C=10, kernel=kernel)
-        params |= dict(class_weight='balanced')
-
-        train_eval_large(
-            model=SVC,
-            model_name='SVM with Quantum Kernel',
-            params=params,
-            x_train=train_x_normalized,
-            y_train=train_y,
-            x_valid=valid_x_normalized,
-            y_valid=valid_y,
-            verbose=verbose,
-            write_data=write_data,
-        )
-
-    ###################################################################################################################
-    # QSVM w/ Quantum Kernels #########################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '4' in MODELS:
-        if DATASET == 'kits':
-            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-            params = dict(B=2, P=0, K=3, zeta=0.8, kernel=kernel)
-        elif DATASET == 'downtown':
-            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-            params = dict(B=2, P=0, K=3, zeta=0.8, kernel=kernel)
-        elif DATASET == 'ptgrey':
-            kernel = data_reuploading_feature_map(num_features=4, reps=1, entanglement='full')
-            params = dict(B=2, P=1, K=3, zeta=0.4, kernel=kernel)
-        params |= dict(sampler='steepest_descent', num_reads=100, normalize=True)
-
-        train_eval_large(
-            model=QSVM,
-            model_name='QSVM with Quantum Kernel',
-            params=params,
-            x_train=train_x,
-            y_train=train_y,
-            x_valid=valid_x,
-            y_valid=valid_y,
-            verbose=verbose,
-            write_data=write_data,
-        )
-
-    ###################################################################################################################
-    # QBoost ##########################################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '5' in MODELS:
-        train_args = dict(train_x=train_x, train_y=train_y, balance_classes=True, verbose=verbose)
-        if DATASET == 'kits':
-            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
-            params = dict(B=2, P=0, K=3, weak_classifiers=weak_classifiers)
-        elif DATASET == 'downtown':
-            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
-            params = dict(B=2, P=0, K=3, weak_classifiers=weak_classifiers)
-        elif DATASET == 'ptgrey':
-            weak_classifiers = train_weak_classifiers(SM=[(40, 40)], **train_args)[0]
-            params = dict(B=2, P=1, K=7, weak_classifiers=weak_classifiers)
-        params |= dict(lbda=(0.0, 2.1, 0.1), sampler='steepest_descent', num_reads=100)
-
-        train_eval_large(
-            model=QBoost,
-            model_name='QBoost',
-            params=params,
-            x_train=train_x,
-            y_train=train_y,
-            x_valid=valid_x,
-            y_valid=valid_y,
-            verbose=verbose,
-            write_data=write_data,
-        )
-
-    ###################################################################################################################
-    # AdaBoost ########################################################################################################
-    ###################################################################################################################
-
-    if MODELS is None or '6' in MODELS:
-        train_args = dict(train_x=train_x, train_y=train_y, balance_classes=True, verbose=verbose)
-        if DATASET == 'kits':
-            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
-            params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
-        elif DATASET == 'downtown':
-            weak_classifiers = train_weak_classifiers(SM=[(50, 20)], **train_args)[0]
-            params = dict(n_estimators=50, weak_classifiers=weak_classifiers)
-        elif DATASET == 'ptgrey':
-            weak_classifiers = train_weak_classifiers(SM=[(40, 40)], **train_args)[0]
-            params = dict(n_estimators=30, weak_classifiers=weak_classifiers)
-
-        train_eval_large(
-            model=AdaBoost,
-            model_name='AdaBoost',
-            params=params,
-            x_train=train_x,
-            y_train=train_y,
-            x_valid=valid_x,
-            y_valid=valid_y,
-            verbose=verbose,
             write_data=write_data,
         )
 
@@ -993,25 +684,17 @@ def compute_qsvm_threshold():
 
     # Best params for the QSVM model
     if DATASET == 'kits':
-        params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.1)
+        params = dict(B=2, P=1, K=4, zeta=0.0, gamma=0.1778279410038923)
     elif DATASET == 'downtown':
-        params = dict(B=2, P=0, K=3, zeta=0.8, gamma=0.01)
+        params = dict(B=2, P=2, K=4, zeta=0.4, gamma=1.0)
     elif DATASET == 'ptgrey':
         params = dict(B=2, P=2, K=4, zeta=1.2, gamma=1.7782794100389228)
-    params |= dict(
-        kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True, optimize_memory=False, verbose=False
-    )
+    params |= dict(kernel='rbf', sampler='steepest_descent', num_reads=100, normalize=True, optimize_memory=False)
 
-    # # QUBO coefficients are given by
-    # # \tilde Q_{Kn + k, Km + j} = \frac12 B^{k + j - 2P} y_n y_m (\kappa(\mathbf x_n, \mathbf x_m) + \zeta) - \delta_{nm} \delta_{kj} B^{k - P}
-    # # for k, j in {0, 1, ..., K-1} and n, m in {0, 1, ..., N-1}.
-    # # The RBF, Sigmoid, and Quantum kernels have a maximum of 1, so the max magnitude of the QUBO coefficients is
-    # # 0.5 * B^(2(K - 1) - 2P) * (1 + zeta).
-    # coefs_max = 0.5 * params['B'] ** (2 * (params['K'] - 1) - 2 * params['P']) * (1 + params['zeta'])
-    # print(f'{coefs_max = }')
-
-    n_trials = 100
-    threshold_space = np.geomspace(0.001, 0.9, 30)
+    n_trials = 200
+    threshold_space = np.hstack(([0.0], np.geomspace(0.005, 0.75, 30)))
+    ratio = threshold_space[2] / threshold_space[1]
+    threshold_space = np.geomspace(0.005 / ratio**23, 0.75 / ratio**30, 23)
 
     cm_dtype = np.float64
 
@@ -1021,7 +704,7 @@ def compute_qsvm_threshold():
 
     for trial in tqdm(range(n_trials)):
         _, train_x, train_y, valid_x, valid_y, _, _, _, _ = get_data(
-            n_train_samples, n_valid_samples, features, False, False
+            n_train_samples, n_valid_samples, features, False, False, DATASET, WORKING_DIR
         )
 
         n_accepted, n_rejected = np.empty(len(threshold_space), dtype=int), np.empty(len(threshold_space), dtype=int)
@@ -1043,32 +726,108 @@ def compute_qsvm_threshold():
         all_n_rejected[trial] = n_rejected
         all_cms[trial] = cms
 
-    with open(LOG_DIR / f'threshold_analysis_{DATASET}.pkl', 'wb') as f:
+    with open(
+        LOG_DIR / f'threshold_analysis_ts={n_train_samples}' / f'threshold_analysis_{DATASET}_{SEED}.pkl', 'wb'
+    ) as f:
         dill.dump((threshold_space, all_n_accepted, all_n_rejected, all_cms), f)
 
 
 def analyze_qsvm_threshold():
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import SymmetricalLogLocator, LogLocator
 
-    fig = plt.figure()
-    threshold_space = np.geomspace(0.00316228, 0.7498942, 20)
-    for dataset in ('kits', 'downtown', 'ptgrey'):
-        try:
-            with open(LOG_DIR / f'threshold_analysis_{dataset}.pkl', 'rb') as f:
-                threshold_space, n_accepted, n_rejected, cms = dill.load(f)
-        except FileNotFoundError:
-            continue
+    plt.rcParams.update(
+        {
+            'text.usetex': True,
+            'font.family': 'serif',
+            'font.serif': ['Computer Modern Roman'],
+        }
+    )
 
-    #     n_accepted = np.asarray(n_accepted)
-    #     n_rejected = np.asarray(n_rejected)
-    #     n_total = n_accepted + n_rejected
+    thresh_space1 = np.hstack(([0.0], np.geomspace(0.005, 0.75, 30)))
+    ratio = thresh_space1[2] / thresh_space1[1]
+    thresh_space2 = np.geomspace(0.005 / ratio**23, 0.75 / ratio**30, 23)
+    full_thresh_space = np.hstack(([0.0], np.geomspace(0.005 / ratio**23, 0.75, 53)))
 
-    #     mccs = [matthews_corrcoef(cm) for cm in cms]
-    #     # plt.scatter(n_rejected / n_total, mccs, label=dataset.capitalize())
-    #     plt.scatter(threshold_space, mccs, label=dataset.capitalize())
+    _, axs = plt.subplots(2, 1, figsize=(8, 8 * 0.8))
+    for i, dataset in enumerate(('kits', 'downtown', 'ptgrey')):
+        cms = np.full((200, 54, 4), -1, dtype=np.float64)
+        for file in (LOG_DIR / 'threshold_analysis_ts=1000').glob(f'threshold_analysis_{dataset}_[0-9]*.pkl'):
+            with open(file, 'rb') as f:
+                thresh_space, n_accepted, n_rejected, cm = dill.load(f)
+            if np.array_equal(thresh_space, thresh_space1):
+                slice1 = (slice(100) if cms[0, 0, 0] < 0 else slice(100, None), 0, slice(None))
+                slice2 = (slice(100) if cms[0, 0, 0] < 0 else slice(100, None), slice(24, None), slice(None))
+                assert np.all(np.isin(cms[slice1], (-1,))), 'Slice 1 indexing incorrect'
+                assert np.all(np.isin(cms[slice2], (-1,))), 'Slice 2 indexing incorrect'
+                cms[slice1] = cm[:, 0, :]
+                cms[slice2] = cm[:, 1:, :]
+            elif np.array_equal(thresh_space, thresh_space2):
+                slice3 = np.s_[:, 1:24, :]
+                assert np.all(np.isin(cms[slice3], (-1,))), 'Slice 3 indexing incorrect'
+                cms[slice3] = cm
+            else:
+                raise ValueError(f'Unknown threshold space: {thresh_space}')
+        assert np.all(cms >= 0), 'CM array not set correctly'
 
-    # plt.xscale('log')
-    # plt.legend()
+        # mccs = np.fromiter((matthews_corrcoef(cm) for cm in cms), dtype=float)
+        # accs = np.fromiter((accuracy(cm) for cm in cms), dtype=float)
+        mccs = np.apply_along_axis(matthews_corrcoef, 2, cms)
+        accs = np.apply_along_axis(accuracy, 2, cms)
+        mcc_avg = mccs.mean(axis=0)
+        acc_avg = accs.mean(axis=0)
+        mcc_std = mccs.std(axis=0)
+        acc_std = accs.std(axis=0)
+
+        axs[0].errorbar(
+            full_thresh_space,
+            mcc_avg,
+            yerr=mcc_std,
+            fmt='.',
+            c=['firebrick', 'darkblue', 'darkgreen'][i],
+            linewidth=1,
+            label=f'Area {i + 1}',
+            capsize=2,
+        )
+        axs[1].errorbar(
+            full_thresh_space,
+            acc_avg,
+            yerr=acc_std,
+            fmt='.',
+            c=['firebrick', 'darkblue', 'darkgreen'][i],
+            linewidth=1,
+            label=f'Area {i + 1}',
+            capsize=2,
+        )
+
+    for ax in axs:
+        ax.set_xlabel(r'Relative Threshold $T$')
+    axs[0].set_ylabel(r'MCC')
+    axs[1].set_ylabel(r'Accuracy')
+
+    # Set x-axis to symlog scale
+    # axs[0].set_xscale('symlog', linthresh=full_thresh_space[1], linscale=0.2)
+    for ax in axs:
+        ax.set_xscale('symlog', linthresh=1e-4, linscale=0.2)
+        ax.set_xlim(left=-0.00002, right=1)  # right=axs[0].get_xlim()[1])
+
+        # # Customize x-axis ticks
+        ax.xaxis.set_major_locator(SymmetricalLogLocator(linthresh=full_thresh_space[1], base=10))
+        ax.xaxis.set_minor_locator(LogLocator(subs='all'))
+
+        major_xticks = ax.xaxis.get_major_ticks()
+        major_xticks[1].set_visible(False)
+
+        minor_xticks = ax.xaxis.get_minor_ticks()
+        for tick in minor_xticks[:8]:
+            tick.set_visible(False)
+
+        ax.grid(which='both', alpha=0.3)
+        ax.legend(loc='lower left')
+
+    axs[0].set_ylim([0.36, 0.74])
+    plt.tight_layout()
+    plt.savefig(WORKING_DIR / 'plots' / f'threshold_analysis.png', dpi=300, bbox_inches='tight')
     # plt.show()
 
 
@@ -1083,13 +842,11 @@ if __name__ == '__main__':
     LOG_DIR = WORKING_DIR / 'logs'
     if DATASET is not None:
         HPO_LOG_DIR = LOG_DIR / f'hpo_logs_{DATASET}'
-        LARGE_LOG_DIR = LOG_DIR / f'large_logs_{DATASET}'
 
     MODELS = sys.argv[2] if len(sys.argv) > 2 else None
 
     SEED = int(sys.argv[3]) if len(sys.argv) > 3 else np.random.randint(100, 1_000_000)
 
-    # hpo()
-    # run_large()
-    compute_qsvm_threshold()
+    hpo()
+    # compute_qsvm_threshold()
     # analyze_qsvm_threshold()

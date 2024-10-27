@@ -2,8 +2,8 @@ import os
 import sys
 import time
 import numbers
-import logging
 import warnings
+import logging
 from typing import Optional, Any
 from collections.abc import Callable, Iterator
 from functools import partial
@@ -12,8 +12,9 @@ import numpy as np
 import dimod
 from dimod import BinaryQuadraticModel
 from dwave.samplers import SimulatedAnnealingSampler, TabuSampler, SteepestDescentSampler
-from dwave.system import LeapHybridSampler, DWaveSampler, AutoEmbeddingComposite
+from dwave.system import LeapHybridSampler, DWaveSampler, DWaveCliqueSampler, AutoEmbeddingComposite
 from sklearn.metrics.pairwise import linear_kernel, rbf_kernel, polynomial_kernel, sigmoid_kernel
+from tqdm import tqdm
 
 from sklearn.base import BaseEstimator, ClassifierMixin, _fit_context
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
@@ -97,8 +98,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         https://www.sciencedirect.com/science/article/pii/S001046551930342X.
     '''
 
-    _dwave_sampler: Optional[DWaveSampler] = None
-    _hybrid_sampler: Optional[LeapHybridSampler] = None
+    _dwave_sampler: Optional[DWaveSampler | DWaveCliqueSampler | LeapHybridSampler] = None
 
     _parameter_constraints = {
         'kernel': [Options(str, {'linear', 'rbf', 'poly', 'sigmoid'}), callable],  # valid string options or callable
@@ -109,16 +109,21 @@ class QSVM(ClassifierMixin, BaseEstimator):
         'gamma': [Interval(numbers.Real, 0.0, None, closed='left')],  # non-negative float
         'coef0': [numbers.Real],  # any float
         'degree': [Interval(numbers.Integral, 0, None, closed='left')],  # non-negative integer
-        'sampler': [Options(str, {'qa', 'simulate', 'steepest_descent', 'tabu', 'hybrid'})],  # valid string options
+        'sampler': [
+            Options(str, {'qa', 'qa_clique', 'simulate', 'steepest_descent', 'tabu', 'hybrid'})
+        ],  # valid string options
         'num_reads': [Interval(numbers.Integral, 1, None, closed='left')],  # positive integer
-        'hybrid_time_limit': [Interval(numbers.Real, 0.0, None, closed='neither')],  # positive float
+        'hybrid_time_limit': [Interval(numbers.Integral, 1, None, closed='left'), None],  # positive integer or None
         'normalize': ['boolean'],  # boolean
         'multi_class_strategy': [Options(str, {'ovo', 'ovr'})],  # valid string options
-        'dwave_api_token': [str, None],
         'threshold': [Interval(numbers.Real, 0.0, None, closed='left')],  # non-negative float
         'threshold_strategy': [Options(str, {'absolute', 'relative'})],  # valid string options
         'optimize_memory': ['boolean'],  # boolean
-        'verbose': ['boolean', Interval(numbers.Integral, 0, None, closed='left')],  # boolean or non-negative integer
+        'max_annealing_tries': [Interval(numbers.Integral, 1, None, closed='left')],  # positive integer
+        'retry_delay': [Interval(numbers.Real, 0.0, None, closed='left')],  # non-negative float
+        'fail_to_classical': ['boolean'],  # boolean
+        'dwave_api_token': [str, None],  # string or None
+        'verbose': ['boolean'],  # boolean
     }
 
     def __init__(
@@ -133,14 +138,17 @@ class QSVM(ClassifierMixin, BaseEstimator):
         degree: int = 3,
         sampler: str = 'steepest_descent',
         num_reads: int = 100,
-        hybrid_time_limit: float = 3,
+        hybrid_time_limit: Optional[int] = 3,
         normalize: bool = True,
         multi_class_strategy: str = 'ovo',
-        dwave_api_token: Optional[str] = None,
         threshold: float = 0.0,
         threshold_strategy: str = 'absolute',
         optimize_memory: bool = True,
-        verbose: bool | int = False,
+        max_annealing_tries: int = 2,
+        retry_delay: float = 2.0,
+        fail_to_classical: bool = True,
+        dwave_api_token: Optional[str] = None,
+        verbose: bool = False,
     ) -> None:
         '''
         Parameters
@@ -172,24 +180,19 @@ class QSVM(ClassifierMixin, BaseEstimator):
             Degree of the polynomial kernel function ('poly'). Must be non-negative. Ignored by all other kernels.
             Default is 3.
         sampler : str
-            The sampler used for annealing. One of 'qa', 'simulate', 'steepest_descent', 'tabu', or 'hybrid'. Only 'qa'
-            and 'hybrid' use real quantum hardware. 'qa' will fail if the problem is too large to easily embed on the
-            quantum annealer.  Default is 'steepest_descent'.
+            The sampler used for annealing. One of 'qa', 'qa_clique', 'simulate', 'steepest_descent', 'tabu', or
+            'hybrid'. Only 'qa', 'qa_clique', and 'hybrid' use real quantum hardware. 'qa' will fail if the problem
+            is too large to easily embed on the quantum annealer.  Default is 'steepest_descent'.
         num_reads : int
             Number of reads of the quantum or simulated annealer to compute the QSVM solution.
             Default is 100.
-        hybrid_time_limit : float
+        hybrid_time_limit : int | None
             The time limit in seconds for the hybrid solver. Default is 3.
         normalize : bool
             Whether or not to normalize input data. Default is True.
         multi_class_strategy : str
             The strategy to use if targets have more than two classes. One of 'ovo' for one-vs-one or 'ovr for
             one-vs-rest. Default is 'ovo'.
-        dwave_api_token : str | None
-            An API token for a D-Wave Leap account. This is necessary to run annealing on quantum hardware (sampler is
-            'hybrid' or 'qa'). In this case, the environment variable DWAVE_API_TOKEN is set to the provided token. It
-            is not necessary if quantum computation is being simulated (sampler is 'simulate', 'tabu', or
-            'steepest_descent'). Default is None.
         threshold : float
             A threshold to use in the QSVM QUBO model.  Biases and coupling strengths with absolute value below this
             threshold are set to zero to reduce the size of the QUBO and speed up computation. Default is 0.0.
@@ -200,8 +203,21 @@ class QSVM(ClassifierMixin, BaseEstimator):
             `optimize_memory=True`. Default is 'absolute'.
         optimize_memory : bool
             Whether or not to optimize the memory usage at the expense of computation time. Default is True.
-        verbose : bool | int
-            Whether or not to print information about the QSVM computation. Default is False.
+        max_annealing_tries: int
+            The maximum number of times to try running the annealing method. Default is 2.
+        retry_delay : float
+            The delay in seconds between retries of the annealing method. Only applies if max_annealing_tries > 1.
+            Default is 2.0.
+        fail_to_classical : bool
+            If True and sampling a QUBO on a quantum device fails, sampling is re-run using a classical solver.
+            Default is True.
+        dwave_api_token : str | None
+            An API token for a D-Wave Leap account. This is necessary to run annealing on quantum hardware (sampler is
+            'qa', 'qa_clique', or 'hybrid'). In this case, the environment variable DWAVE_API_TOKEN is set to the
+            provided token. It is not necessary if quantum computation is being simulated (sampler is 'simulate',
+            'tabu', or 'steepest_descent'). Default is None.
+        verbose : bool
+            Whether or not to print progress messages. Default is False.
         '''
 
         self.B = B  # Base of the encoding
@@ -227,7 +243,22 @@ class QSVM(ClassifierMixin, BaseEstimator):
         self.threshold = threshold
         self.threshold_strategy = threshold_strategy
         self.optimize_memory = optimize_memory
+        self.max_annealing_tries = max_annealing_tries
+        self.retry_delay = retry_delay
+        self.fail_to_classical = fail_to_classical
         self.verbose = verbose
+
+    def _configure_logger(self) -> None:
+        self._logger = logging.getLogger(self.__class__.__name__)
+        handler = logging.StreamHandler(sys.stdout)  # Log to standard output
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        if not self._logger.hasHandlers():
+            self._logger.addHandler(handler)
+        if self.verbose:
+            self._logger.setLevel(logging.INFO)
+        else:
+            self._logger.setLevel(logging.WARNING)
 
     def _define_kernel(self) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
         '''
@@ -286,22 +317,6 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         return (gamma * X @ Y + coef0) ** degree
 
-    def _configure_logger(self) -> None:
-        '''
-        Configure the logger.
-        '''
-
-        self._logger = logging.getLogger(self.__class__.__name__)
-        handler = logging.StreamHandler(sys.stdout)  # Log to standard output
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        if not self._logger.hasHandlers():
-            self._logger.addHandler(handler)
-        if self.verbose:
-            self._logger.setLevel(logging.INFO)
-        else:
-            self._logger.setLevel(logging.WARNING)
-
     @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X: np.ndarray, y: np.ndarray) -> 'QSVM':
         '''
@@ -316,18 +331,17 @@ class QSVM(ClassifierMixin, BaseEstimator):
         '''
 
         self._configure_logger()
-        self._logger.info('Starting fitting process')
+
+        self._logger.info('Fitting QSVM')
 
         # Check that inputs are of the right shape and that all parameters
         # are valid (as defined in cls._parameter_constraints).
         # This casts X and y to numpy arrays.
-        self._logger.info('Validating input data')
         X, y = self._validate_data(X, y, ensure_min_samples=2)
         X: np.ndarray
         y: np.ndarray
 
         # Make sure we have a classification task
-        self._logger.info('Checking that we have a binary or multiclass classification task')
         check_classification_targets(y)
 
         # Check that targets are binary or multiclass
@@ -340,57 +354,45 @@ class QSVM(ClassifierMixin, BaseEstimator):
         self.classes_ = np.unique(y)  # Store the unique classes
 
         if self.is_multi_class_:
-            self._logger.info(f'Handling multiclass with strategy: {self.multi_class_strategy}')
+            self._logger.info(f'Handling multi-class classification with strategy {self.multi_class_strategy}')
             if self.multi_class_strategy == 'ovr':
                 self.multi_class_model_ = OneVsRestClassifier(self)
             elif self.multi_class_strategy == 'ovo':
                 self.multi_class_model_ = OneVsOneClassifier(self)
             else:
                 raise ValueError(f'Unknown multi_class_strategy: {self.multi_class_strategy}')
-            self._logger.info('Fitting multiclass model')
             self.multi_class_model_.fit(X, y)  # Fit the multi-class model
             return self
 
-        if self.sampler in ['hybrid', 'qa'] and self.dwave_api_token is not None:
-            self._logger.info('D-Wave API token set to environment variable DWAVE_API_TOKEN')
+        if self.sampler in ('hybrid', 'qa', 'qa_clique') and self.dwave_api_token is not None:
+            self._logger.info(f'Setting D-Wave API token')
             os.environ['DWAVE_API_TOKEN'] = self.dwave_api_token
 
         # Binary classification
-        self._logger.info('Setting up binary classification')
         self.B_ = float(self.B)  # B must be a float for array exponentiation
         self.classes_binary_ = np.unique(y)  # Store the unique classes
-        self._logger.info('Checking normalization')
         X_ = self._normalize(X, train=True)  # Normalize the data
-        self._logger.info('Converting class labels to ±1')
         y_ = self._binarize_y(y)  # Convert y from arbitrary class labels to ±1
 
         if hasattr(self, 'bias_') and np.array_equal(self.X_, X_) and np.array_equal(self.y_, y_):
-            self._logger.info('Model already fitted on this data, skipping fitting process')
+            self._logger.info('Already fit QSVM with these parameters. Returning existing model.')
             return self
 
         self.X_ = X_
         self.y_ = y_
         self.N_ = self.X_.shape[0]  # Number of train points
 
-        self._logger.info('Defining kernel function')
         self.kernel_func_2D_, self.kernel_func_1D_ = self._define_kernel()
         if self.optimize_memory:
             if self.threshold_strategy == 'relative':
                 raise ValueError('Relative threshold strategy not available when optimize_memory=True')
-            self._logger.info('Optimizing memory usage, computing kernel and QUBO elements on-the-fly')
         else:
-            self._logger.info('Not optimizing memory usage, computing kernel matrix')
             self.computed_kernel_ = self.kernel_func_2D_(self.X_, self.X_)
-            self._logger.info('Not optimizing memory usage, computing QUBO matrix')
             self.qubo_ = self._compute_qubo_fast()
 
-        self._logger.info('Running sampler')
         sample = self._run_sampler()
-        self._logger.info('Computing QSVM coefficients')
         self.alphas_ = self._compute_qsvm_coefficients(sample)
-        self._logger.info('Computing bias')
         self.bias_ = self._compute_bias()
-        self._logger.info('Fitting process complete')
 
         return self
 
@@ -401,12 +403,10 @@ class QSVM(ClassifierMixin, BaseEstimator):
         '''
 
         if np.all(np.isin(self.classes_binary_, (-1, 1))):
-            self._logger.info('Classes are already ±1, skipping binarization')
             return y.astype(int)
+        self._logger.info(f'{"De-binarizing" if reverse else "Binarizing"} targets')
         if reverse:
-            self._logger.info('Reversing binarization from ±1 to original classes')
             return np.where(y == -1, self.classes_binary_[0], self.classes_binary_[1])
-        self._logger.info('Binarizing classes from original classes to ±1')
         return np.where(y == self.classes_binary_[0], -1, 1)
 
     def _normalize(self, X: np.ndarray, train: bool = False) -> np.ndarray:
@@ -415,7 +415,6 @@ class QSVM(ClassifierMixin, BaseEstimator):
         '''
 
         if not self.normalize:
-            self._logger.info('Normalization disabled, skipping normalization')
             return X
         self._logger.info('Normalizing data')
         if train:
@@ -428,7 +427,6 @@ class QSVM(ClassifierMixin, BaseEstimator):
         Generate QUBO elements on-the-fly to save memory.
         '''
 
-        self._logger.info('Generating QUBO elements')
         k = np.arange(self.K).reshape(self.K, 1)
         j = np.arange(self.K)
         base_power = self.B_ ** (k + j - 2.0 * self.P)
@@ -451,6 +449,8 @@ class QSVM(ClassifierMixin, BaseEstimator):
         Compute the QUBO matrix associated to the QSVM problem from the precomputed kernel
         and the targets y.
         '''
+
+        self._logger.info('Computing QUBO explicitly')
 
         # Compute the coefficients without the base exponent or diagonal adjustments
         y_expanded = self.y_[:, np.newaxis]
@@ -477,12 +477,6 @@ class QSVM(ClassifierMixin, BaseEstimator):
         qubo_array[lower_triangle_indices] = 0
         qubo_array[upper_triangle_indices] *= 2
 
-        self._logger.info('QUBO matrix computed')
-        self._logger.info(
-            f'Number of upper triangular elements: {qubo_array.shape[0] * (qubo_array.shape[0] + 1) / 2:_}'
-        )
-        self._logger.info(f'Number of non-zero elements: {np.count_nonzero(qubo_array):_}')
-
         return qubo_array
 
     def _run_sampler(self) -> dict[int, int]:
@@ -491,11 +485,17 @@ class QSVM(ClassifierMixin, BaseEstimator):
         indices of the binary variables to their values.
         '''
 
-        if self.sampler == 'hybrid':
-            self._logger.info('Running hybrid sampler')
-            return retry(self._run_hybrid_sampler, max_retries=2, delay=1, warn=True)
-        self._logger.info('Running pure sampler')
-        return retry(self._run_pure_sampler, max_retries=2, delay=1, warn=True)
+        retry_args = dict(max_retries=self.max_annealing_tries, delay=self.retry_delay, warn=True)
+        try:
+            if self.sampler == 'hybrid':
+                return retry(self._run_hybrid_sampler, **retry_args)
+            return retry(self._run_pure_sampler, **retry_args)
+        except Exception as e:
+            if self.fail_to_classical and self.sampler in ('qa', 'qa_clique', 'hybrid'):
+                self.sampler = 'steepest_descent'
+                return retry(self._run_pure_sampler, **retry_args)
+            else:
+                raise e
 
     def _run_pure_sampler(self) -> dict[int, int]:
         '''
@@ -503,34 +503,37 @@ class QSVM(ClassifierMixin, BaseEstimator):
         '''
 
         if self.sampler == 'simulate':
-            self._logger.info('Running simulated annealing sampler')
             sampler = SimulatedAnnealingSampler()
+
         elif self.sampler == 'tabu':
-            self._logger.info('Running tabu sampler')
             sampler = TabuSampler()
+
         elif self.sampler == 'steepest_descent':
-            self._logger.info('Running steepest descent sampler')
             sampler = SteepestDescentSampler()
+
         elif self.sampler == 'qa':
-            self._logger.info('Running D-Wave sampler')
-            if self._dwave_sampler is None:
-                self._logger.info('Initializing DWaveSampler')
+            if not isinstance(self._dwave_sampler, AutoEmbeddingComposite):
                 self._set_dwave_sampler()
             sampler = AutoEmbeddingComposite(self._dwave_sampler)
+
+        elif self.sampler == 'qa_clique':
+            if not isinstance(self._dwave_sampler, DWaveCliqueSampler):
+                self._set_dwave_clique_sampler()
+            sampler = self._dwave_sampler
+
         else:
             raise ValueError(f'Unknown pure sampler: {self.sampler}')
 
-        return self._run_from_sampler(sampler, dict(num_reads=self.num_reads))
+        return self._run_from_sampler(sampler, {'num_reads': self.num_reads})
 
     def _run_hybrid_sampler(self) -> dict[int, int]:
         '''
         Run the Leap hybrid sampler on the QUBO.
         '''
 
-        if self._hybrid_sampler is None:
-            self._logger.info('Initializing LeapHybridSampler')
+        if not isinstance(self._dwave_sampler, LeapHybridSampler):
             self._set_hybrid_sampler()
-        return self._run_from_sampler(self._hybrid_sampler, dict(time_limit=self.hybrid_time_limit))
+        return self._run_from_sampler(self._dwave_sampler, {'time_limit': self.hybrid_time_limit})
 
     def _run_from_sampler(
         self,
@@ -543,14 +546,12 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         if self.optimize_memory:
             bqm = self._generate_thresholded_bqm()
-            self._logger.info('Submitting BQM to sampler')
+            self._logger.info('Sampling BQM')
             sample_set = sampler.sample(bqm, **sampler_kwargs)
-            self._logger.info('Sample set received from sampler')
         else:
-            qubo_thres = self._compute_thresholded_qubo()
-            self._logger.info('Submitting QUBO to sampler')
-            sample_set = sampler.sample_qubo(qubo_thres, **sampler_kwargs)
-            self._logger.info('Sample set received from sampler')
+            qubo = self._compute_thresholded_qubo()
+            self._logger.info('Sampling QUBO')
+            sample_set = sampler.sample_qubo(qubo, **sampler_kwargs)
 
         return sample_set.first.sample
 
@@ -559,21 +560,23 @@ class QSVM(ClassifierMixin, BaseEstimator):
         Build a BQM while thresholding QUBO elements on-the-fly to save memory.
         '''
 
+        self._logger.info('Generating BQM')
+
         self.n_rejected_ = self.n_accepted_ = 0
-        self._logger.info('Generating BQM from QUBO elements')
         bqm = BinaryQuadraticModel(vartype=dimod.BINARY, dtype=np.float32)
-        for (u, v), bias in self._qubo_generator():
+        num_qubo_elements = self.N_ * self.K * (self.N_ * self.K + 1) / 2
+        for (u, v), bias in tqdm(
+            self._qubo_generator(), total=num_qubo_elements, disable=not self.verbose, desc='Generating QUBO'
+        ):
+            if u == v:
+                bqm.add_linear(u, bias)
+                continue
             if (b := abs(bias)) < self.threshold:
                 self.n_rejected_ += b > 0
                 continue
             self.n_accepted_ += 1
-            if u == v:
-                bqm.add_linear(u, bias)
-            else:
-                bqm.add_quadratic(u, v, bias)
+            bqm.add_quadratic(u, v, bias)
 
-        self._logger.info(f'{self.n_rejected_:_} QUBO elements rejected by threshold')
-        self._logger.info(f'{self.n_accepted_:_} QUBO elements accepted by threshold')
         return bqm
 
     def _compute_thresholded_qubo(self) -> np.ndarray:
@@ -583,35 +586,58 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         if self.threshold > 0:
             if self.threshold_strategy == 'absolute':
-                self._logger.info('Thresholding QUBO elements using absolute strategy')
-                qubo_lt_thres = np.abs(self.qubo_) < self.threshold
-                self.n_rejected_ = ((np.abs(self.qubo_) > 0) & qubo_lt_thres).sum()
-                self.n_accepted_ = (~qubo_lt_thres).sum()
-                qubo_thres = np.where(qubo_lt_thres, 0, self.qubo_)
+                upper_tri_indices = np.triu_indices_from(self.qubo_, 1)
+                upper_tri_elements = np.abs(self.qubo_[upper_tri_indices])
+
+                self.n_rejected_ = ((upper_tri_elements > 0) & (upper_tri_elements < self.threshold)).sum()
+                self.n_accepted_ = (upper_tri_elements >= self.threshold).sum()
+
+                qubo_thres = self.qubo_.copy()
+                qubo_thres[upper_tri_indices] = np.where(
+                    upper_tri_elements < self.threshold, 0, self.qubo_[upper_tri_indices]
+                )
             else:
-                self._logger.info('Thresholding QUBO elements using relative strategy')
-                n_non_zero = np.count_nonzero(self.qubo_)
-                self.n_rejected_ = int(n_non_zero * self.threshold)
-                self.n_accepted_ = n_non_zero - self.n_rejected_
+                qubo_thres = np.triu(self.qubo_, k=1)
+                n_nonzero = np.count_nonzero(qubo_thres)
 
-                qubo_thres = self.qubo_.flatten()
-                non_zero_indices = np.nonzero(qubo_thres)[0]
-                non_zero_elements = qubo_thres[non_zero_indices]
+                self.n_rejected_ = int(n_nonzero * self.threshold)
+                self.n_accepted_ = n_nonzero - self.n_rejected_
 
-                # The k-th element will be in its final sorted position and all smaller elements will be moved before it and all larger elements behind it.
-                # Returns an array of indices that partition a along the specified axis.
-                smallest_indices = np.argpartition(np.abs(non_zero_elements), self.n_rejected_)[: self.n_rejected_]
+                triu_indices = np.triu_indices_from(self.qubo_, 1)
+                unique_vals, counts = np.unique(np.abs(qubo_thres[triu_indices]), return_counts=True)
+                cumsum_counts = np.cumsum(counts)
+                threshold_index = np.searchsorted(cumsum_counts, self.n_rejected_, side='left')
 
-                qubo_thres[non_zero_indices[smallest_indices]] = 0
-                qubo_thres = qubo_thres.reshape(self.qubo_.shape)
+                # Zero out all elements whose absolute value is less than or equal to unique_vals[threshold_index - 1]
+                to_zero_mask1 = np.array([])
+                if threshold_index > 0:
+                    abs_triu_qubo_thres = np.abs(qubo_thres[triu_indices])
+                    to_zero_mask1 = (abs_triu_qubo_thres <= unique_vals[threshold_index - 1]) & (
+                        abs_triu_qubo_thres > 0
+                    )
+                    qubo_thres[triu_indices] = np.where(to_zero_mask1, 0, qubo_thres[triu_indices])
 
-            self._logger.info(f'{self.n_rejected_:_} QUBO elements rejected by threshold')
-            self._logger.info(f'{self.n_accepted_:_} QUBO elements accepted by threshold')
+                to_keep = cumsum_counts[threshold_index] - self.n_rejected_
+
+                # Zero out a random selection of the remaining n_rejected - already_zeroed elements equal to unique_vals[threshold_index]
+                to_zero_mask2_flat = (np.abs(qubo_thres) == unique_vals[threshold_index]).flatten()
+                to_zero_mask2_flat_set_false_indices = np.random.choice(
+                    np.nonzero(to_zero_mask2_flat)[0], size=to_keep, replace=False
+                )
+                to_zero_mask2_flat[to_zero_mask2_flat_set_false_indices] = False
+                to_zero_mask2 = to_zero_mask2_flat.reshape(qubo_thres.shape)
+                qubo_thres[to_zero_mask2] = 0
+
+                # assert (
+                #     self.n_rejected_ == to_zero_mask1.sum() + to_zero_mask2.sum()
+                # ), 'Number of rejected elements does not match'
+
+                np.fill_diagonal(qubo_thres, np.diag(self.qubo_))  # Operates in-place
 
         else:
-            self._logger.info('Threshold is 0, not rejecting any QUBO elements')
-            self._logger.info(f'Number of non-zero QUBO elements: {np.count_nonzero(self.qubo_):_}')
             qubo_thres = self.qubo_
+            self.n_rejected_ = 0
+            self.n_accepted_ = np.count_nonzero(self.qubo_[np.triu_indices_from(self.qubo_, 1)])
 
         return qubo_thres
 
@@ -622,7 +648,7 @@ class QSVM(ClassifierMixin, BaseEstimator):
         This prevents the creation of too many threads when many QSVM instances are initialized.
         '''
 
-        cls._hybrid_sampler = LeapHybridSampler()
+        cls._dwave_sampler = LeapHybridSampler()
 
     @classmethod
     def _set_dwave_sampler(cls) -> None:
@@ -633,19 +659,29 @@ class QSVM(ClassifierMixin, BaseEstimator):
 
         cls._dwave_sampler = DWaveSampler()
 
+    @classmethod
+    def _set_dwave_clique_sampler(cls) -> None:
+        '''
+        Set the DWave sampler as a class attribute so we can reuse the instance over multiple QSVM instances.
+        This prevents the creation of too many threads when many QSVM instances are initialized.
+        '''
+
+        cls._dwave_sampler = DWaveCliqueSampler()
+
     def _compute_qsvm_coefficients(self, sample: dict[int, int]) -> np.ndarray:
         '''
         Compute the coefficients of the QSVM from the annealing solution. Decodes the binary variable encoding.
         '''
 
+        self._logger.info('Computing QSVM coefficients')
+
         alphas = np.empty(self.N_)
         powers_of_b = self.B_ ** (np.arange(self.K) - self.P)
         for n in range(self.N_):
             alphas[n] = sum(powers_of_b[k] * sample[self.K * n + k] for k in range(self.K))
-        self._logger.info(f'QSVM coefficients computed')
         return alphas
 
-    def _compute_bias(self, n_biases: int = 100) -> float:
+    def _compute_bias(self, n_biases: int = 200) -> float:
         '''
         Compute the bias which best fits the training data.
         This checks for a bias in the range [-results.max(), -results.min()] using `n_biases` tests
@@ -659,7 +695,6 @@ class QSVM(ClassifierMixin, BaseEstimator):
         # Compute range for biases
         min_bias, max_bias = -results.max(), -results.min()
         if np.isclose(min_bias, max_bias):
-            self._logger.warning('All predictions are the same.')
             if np.all(results > 0):
                 return max_bias - 1e-6  # Just below the minimum positive prediction
             else:
@@ -671,13 +706,11 @@ class QSVM(ClassifierMixin, BaseEstimator):
             acc = (preds == self.y_).sum() / self.y_.shape[0]
             return acc
 
-        self._logger.info(f'Computing bias with {n_biases} tests')
         biases = np.linspace(min_bias, max_bias, n_biases)  # Biases to test
         accuracies = np.fromiter(map(compute_acc, biases), dtype=np.float64)  # Compute the accuracies for each bias
         best_acc_indices = (accuracies == accuracies.max()).nonzero()[0]  # Find indices of biases with best accuracy
         best_acc_index = best_acc_indices[len(best_acc_indices) // 2]  # Choose the middle bias index
         bias = biases[best_acc_index]
-        self._logger.info(f'Best bias computed as: {bias:.4f}')
         return bias
 
     def decision_function(self, X: np.ndarray) -> np.ndarray:
@@ -698,32 +731,31 @@ class QSVM(ClassifierMixin, BaseEstimator):
         check_is_fitted(self)
 
         if self.is_multi_class_:
-            self._logger.info('Running multiclass decision function')
+            self._logger.info('Computing multi-class decision function')
             return self.multi_class_model_.decision_function(X)
 
         # Normalize the input data w.r.t. the training data
         X = self._normalize(X)
 
+        self._logger.info('Computing decision function')
+
         return self._decision_function_no_bias(X) + self.bias_
 
-    def _decision_function_no_bias(self, X: np.ndarray, chunk_size: int = 1000) -> np.ndarray:
+    def _decision_function_no_bias(self, X: np.ndarray, chunk_size: int = 2000) -> np.ndarray:
         '''
         The decision function without the bias term. This is implemented separately from self.decision_function
         for use with bias optimization.
         '''
 
         if self.optimize_memory:
-            self._logger.info('Optimizing memory usage, computing decision function in chunks')
             results = np.zeros(X.shape[0])
             for i in range(0, X.shape[0], chunk_size):  # Process in chunks of chunk_size
                 chunk = X[i : i + chunk_size]
                 kernel_chunk = self.kernel_func_2D_(self.X_, chunk)
                 results[i : i + chunk_size] = (self.alphas_ * self.y_) @ kernel_chunk
         else:
-            self._logger.info('Not optimizing memory usage, computing decision function')
             computed_kernel = self.computed_kernel_ if np.array_equal(X, self.X_) else self.kernel_func_2D_(self.X_, X)
             results = (self.alphas_ * self.y_) @ computed_kernel
-        self._logger.info('Decision function computed')
         return results
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -744,18 +776,49 @@ class QSVM(ClassifierMixin, BaseEstimator):
         check_is_fitted(self)
 
         if self.is_multi_class_:
-            self._logger.info('Running multiclass prediction')
+            self._logger.info('Computing multi-class predictions')
             return self.multi_class_model_.predict(X)
 
         X: np.ndarray = self._validate_data(X, reset=False)
 
+        self._logger.info('Computing predictions')
+
         # Compute the predictions
         results = self.decision_function(X)
-        self._logger.info('Binarizing predictions')
         preds = np.where(results > 0, 1, -1)
 
         preds = self._binarize_y(preds, reverse=True)
         return preds
+
+    def pre_fit_info(self, X: np.ndarray, y: np.ndarray) -> None:
+        self._logger.info('Pre-fit information')
+
+        X, y = self._validate_data(X, y, ensure_min_samples=2)
+        check_classification_targets(y)
+
+        if type_of_target(y) != 'binary':
+            raise ValueError('Pre-fit only available for binary targets')
+
+        try:
+            largest_clique = DWaveCliqueSampler().largest_clique_size
+        except ValueError:
+            largest_clique = None
+
+        N = X.shape[0]
+
+        n_qubo_variables = N * self.K
+        print(f'Number of QUBO variables: K * N = {self.K} * {N} = {n_qubo_variables}')
+        if largest_clique is not None:
+            print(f'Largest clique size: {largest_clique}')
+
+            if n_qubo_variables <= largest_clique:
+                print('QUBO samplable via clique sampler (sampler=\'qa_clique\')')
+            else:
+                print('No clique embedding possible. Use sampler=\'qa\' or sampler=\'hybrid\'')
+
+        coef_max = self.B ** (2 * (self.K - 1) - self.P) * (1 + self.zeta)
+        assume_str = '' if self.kernel in ('rbf', 'sigmoid') else ' (Assuming kernel(x, y)≤1)'
+        print(f'Max coupling strength{assume_str}: {coef_max}')
 
     def __sklearn_is_fitted__(self) -> bool:
         # is_multi_class_ is the first instance attribute set in the fit method,

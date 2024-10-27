@@ -1,4 +1,4 @@
-from typing import Callable
+from collections.abc import Sequence, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -16,7 +16,7 @@ class AdaBoost:
     '''
 
     def __init__(
-        self, weak_classifiers: list[Callable[[np.ndarray], np.ndarray]], n_estimators: int = 50, num_workers: int = 1
+        self, weak_classifiers: Sequence[Callable[[np.ndarray], np.ndarray]], n_estimators: int = 50, num_workers: int = 1
     ) -> None:
         '''
         Initialize the AdaBoost classifier.
@@ -30,7 +30,7 @@ class AdaBoost:
             Number of weak classifiers to use. Default is 50.
         '''
 
-        self.weak_classifiers = weak_classifiers
+        self.weak_classifiers = list(weak_classifiers)
         self.n_estimators = n_estimators
         self.num_workers = num_workers
         self.alphas = []

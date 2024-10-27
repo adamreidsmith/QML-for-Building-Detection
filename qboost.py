@@ -7,7 +7,7 @@ from collections import defaultdict
 
 import numpy as np
 from dwave.samplers import SimulatedAnnealingSampler, SteepestDescentSampler, TabuSampler
-from dwave.system import LeapHybridSampler, DWaveSampler, AutoEmbeddingComposite
+from dwave.system import LeapHybridSampler, DWaveSampler, DWaveCliqueSampler, AutoEmbeddingComposite
 
 from qsvm import retry
 
@@ -25,18 +25,19 @@ class QBoost:
         04-06 Nov 2012. PMLR. https://proceedings.mlr.press/v25/neven12.html.
     '''
 
-    _dwave_sampler: Optional[DWaveSampler] = None
-    _hybrid_sampler: Optional[LeapHybridSampler] = None
+    _dwave_sampler: Optional[DWaveSampler | DWaveCliqueSampler | LeapHybridSampler] = None
 
     def __init__(
         self,
         weak_classifiers: Sequence[Callable[[np.ndarray], np.ndarray]],
-        K: int,
         B: int,
         P: int,
+        K: int,
         lbda: tuple[float, float, float],
         num_reads: int = 100,
         sampler: str = 'steepest_descent',
+        hybrid_time_limit: Optional[int] = 3,
+        fail_to_classical: bool = True,
         dwave_api_token: Optional[str] = None,
     ) -> None:
         '''
@@ -45,42 +46,51 @@ class QBoost:
         weak_classifiers : Sequence[Callable[[np.ndarray], np.ndarray]]
             A sequence of classifiers. Each must map a 2d numpy array of samples with shape (n_samples, n_features)
             to a 1d numpy array of predictions with shape (n_samples,).
-        K : int
-            The bit depth for the coefficient encoding.
         B : int
             The base for the coefficient encoding.
         P : int
             The exponent shift for the coefficient encoding.
+        K : int
+            The bit depth for the coefficient encoding.
         lbda : tuple[float, float, float]
             A tuple of the form (start, stop, step) defining the regularization parameters.
         num_reads : int
             Number of reads for the quantum or classical annealer.
         sampler : str
-            The sampler used for annealing. One of 'qa', 'simulate', 'steepest_descent', 'tabu', or 'hybrid'. Only 'qa'
-            and 'hybrid' use real quantum hardware. 'qa' will fail if the problem is too large to easily embed on the
-            quantum annealer.  Default is 'steepest_descent'.
+            The sampler used for annealing. One of 'qa', 'qa_clique', 'simulate', 'steepest_descent', 'tabu', or
+            'hybrid'. Only 'qa', 'qa_clique, and 'hybrid' use real quantum hardware. 'qa' will fail if the problem is
+            too large to easily embed on the quantum annealer.  Default is 'steepest_descent'.
+        hybrid_time_limit : int | None
+            The time limit in seconds for the hybrid solver. Default is 3.
+        fail_to_classical : bool
+            If True and sampling a QUBO on a quantum device fails, sampling is re-run using a classical solver.
+            Default is True.
         dwave_api_token : str | None
             An API token for a D-Wave Leap account. This is necessary to run annealing on quantum hardware (sampler is
-            'hybrid' or 'qa'). In this case, the environment variable DWAVE_API_TOKEN is set to the provided token. It
-            is not necessary if quantum computation is being simulated (sampler is 'simulate', 'tabu', or
-            'steepest_descent'). Default is None.
+            'hybrid', 'qa', or 'qa_clique'). In this case, the environment variable DWAVE_API_TOKEN is set to the
+            provided token. It is not necessary if quantum computation is being simulated (sampler is 'simulate',
+            'tabu', or 'steepest_descent'). Default is None.
         '''
 
         self.classifiers = list(weak_classifiers)
 
         # Encoding vars
-        self.K = K
         self.B = float(B)
         self.P = P
+        self.K = K
 
         # Regularization vars
         self.lbda = lbda  # (lambda_start, lambda_stop, lambda_step)
 
         self.num_reads = num_reads
         self.sampler = sampler
+        self.hybrid_time_limit = hybrid_time_limit
+        self.fail_to_classical = fail_to_classical
         self.dwave_api_token = dwave_api_token
 
         self.eps = 1e-8  # Coefficients smaller than this are considered zero
+
+        self._qubo_evaluations = []  # Stores the number of variables of each generated QUBO
 
         # Instantiated when `fit` is called
         self._strong_classifier_coeffs: Optional[list[float]] = None
@@ -88,7 +98,7 @@ class QBoost:
 
     def kappa(self, lbda: float) -> float:
         # We must choose kappa > lbda / epsilon in order for L0 regularization to work properly.
-        # Here, epsilon is the smallest positive value the QBoost coefficients can take
+        # Here, epsilon is the smallest positive value the QBoost coefficients can take.
         return 2 * lbda * self.B**self.P
 
     def fit(
@@ -119,7 +129,7 @@ class QBoost:
         self
         '''
 
-        if self.sampler in ['hybrid', 'qa'] and self.dwave_api_token is not None:
+        if self.sampler in ('hybrid', 'qa', 'qa_clique') and self.dwave_api_token is not None:
             os.environ['DWAVE_API_TOKEN'] = self.dwave_api_token
 
         # Validate inputs and obtain classification results
@@ -170,9 +180,7 @@ class QBoost:
                 trial_T_inner = (np.abs(coeffs) > self.eps).sum()
 
                 # Sample the strong classifier using the validation set and determine the validation error
-                predictions = np.empty(n_val_samples)
-                for s in range(n_val_samples):
-                    predictions[s] = np.sign(np.dot(coeffs, val_clf_results[classifier_pool_indices][:, s]))
+                predictions = np.sign(np.dot(np.asarray(coeffs), val_clf_results[classifier_pool_indices]))
                 trial_valid_error = (predictions != y_val).sum() / len(y_val)
 
                 if trial_valid_error < best[-1]:
@@ -198,7 +206,6 @@ class QBoost:
             best_coeffs = [best_coeffs[i] for i in indices_of_nonzero_coeffs]
             best_clf_indices = [best_clf_indices[i] for i in indices_of_nonzero_coeffs]
             classifier_pool_indices = [*best_clf_indices]
-            assert len(best_clf_indices) == len(best_coeffs)
 
             if terminate:
                 break
@@ -287,7 +294,9 @@ class QBoost:
                 qubo[(ii, ii)] += qubo_term
                 qubo[(ii, jj)] -= qubo_term
 
-        return dict(qubo)
+        self._qubo_evaluations.append(self.K * Q if lbda == 0 else (self.K + 1) * Q)
+
+        return {k: v for k, v in qubo.items() if v != 0}
 
     def _run_sampler(self, qubo: dict[tuple[int, int], float]) -> dict[int, int]:
         '''
@@ -295,9 +304,21 @@ class QBoost:
         indices of the binary variables to their values.
         '''
 
-        if self.sampler == 'hybrid':
-            return retry(self._run_hybrid_sampler, max_retries=2, delay=1, warn=True, qubo=qubo)
-        return retry(self._run_pure_sampler, max_retries=2, delay=1, warn=True, qubo=qubo)
+        try:
+            if self.sampler == 'hybrid':
+                return retry(self._run_hybrid_sampler, max_retries=2, delay=1.0, warn=True, qubo=qubo)
+            return retry(self._run_pure_sampler, max_retries=2, delay=1.0, warn=True, qubo=qubo)
+        except Exception as e:
+            if self.fail_to_classical and self.sampler in ('qa', 'qa_clique', 'hybrid'):
+                warnings.warn(
+                    f'Annealing failed on quantum device with error: {str(e)}. '
+                    'Sampling with steepest descent sampler.'
+                )
+                sampler = SteepestDescentSampler()
+                sample_set = sampler.sample_qubo(qubo, num_reads=self.num_reads)
+                return sample_set.first.sample
+            else:
+                raise e
 
     def _run_pure_sampler(self, qubo: dict[tuple[int, int], float]) -> dict[int, int]:
         '''
@@ -306,14 +327,22 @@ class QBoost:
 
         if self.sampler == 'simulate':
             sampler = SimulatedAnnealingSampler()
+
         elif self.sampler == 'tabu':
             sampler = TabuSampler()
+
         elif self.sampler == 'steepest_descent':
             sampler = SteepestDescentSampler()
+
         elif self.sampler == 'qa':
-            if self._dwave_sampler is None:
+            if not isinstance(self._dwave_sampler, AutoEmbeddingComposite):
                 self._set_dwave_sampler()
             sampler = AutoEmbeddingComposite(self._dwave_sampler)
+
+        elif self.sampler == 'qa_clique':
+            if not isinstance(self._dwave_sampler, DWaveCliqueSampler):
+                self._set_dwave_clique_sampler()
+            sampler = self._dwave_sampler
         else:
             raise ValueError(f'Unknown pure sampler: {self.sampler}')
 
@@ -325,9 +354,9 @@ class QBoost:
         Run the Leap hybrid sampler on the qubo.
         '''
 
-        if self._hybrid_sampler is None:
+        if not isinstance(self._dwave_sampler, LeapHybridSampler):
             self._set_hybrid_sampler()
-        sample_set = self._hybrid_sampler.sample_qubo(self.qubo_, time_limit=self.hybrid_time_limit)
+        sample_set = self._dwave_sampler.sample_qubo(qubo, time_limit=self.hybrid_time_limit)
         return sample_set.first.sample
 
     @classmethod
@@ -337,7 +366,7 @@ class QBoost:
         This prevents the creation of too many threads when many QSVM instances are initialized.
         '''
 
-        cls._hybrid_sampler = LeapHybridSampler()
+        cls._dwave_sampler = LeapHybridSampler()
 
     @classmethod
     def _set_dwave_sampler(cls) -> None:
@@ -347,6 +376,15 @@ class QBoost:
         '''
 
         cls._dwave_sampler = DWaveSampler()
+
+    @classmethod
+    def _set_dwave_clique_sampler(cls) -> None:
+        '''
+        Set the DWave sampler as a class attribute so we can reuse the instance over multiple QSVM instances.
+        This prevents the creation of too many threads when many QSVM instances are initialized.
+        '''
+
+        cls._dwave_sampler = DWaveCliqueSampler()
 
     def _decode_vars(self, vars: dict[int, int], n_clf: int) -> list[float]:
         '''
@@ -418,6 +456,36 @@ class QBoost:
         preds = self.predict(x)
         acc = (preds == y).sum() / len(y)
         return acc
+
+    def pre_fit_info(
+        self,
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        x_val: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None,
+    ):
+        x_train, y_train = self._validate_inputs(x_train, y_train)
+        if x_val is not None and y_val is not None:
+            x_val, y_val = self._validate_inputs(x_val, y_val)
+        else:
+            x_val, y_val = x_train, y_train
+
+        Q = len(self.classifiers)
+
+        try:
+            largest_clique = DWaveCliqueSampler().largest_clique_size
+        except ValueError:
+            largest_clique = None
+
+        n_qubo_variables = Q * (self.K + 1)
+        print(f'Number of QUBO variables: (K + 1) * Q = ({self.K} + 1) * {Q} = {n_qubo_variables}')
+        if largest_clique is not None:
+            print(f'Largest clique size: {largest_clique}')
+
+            if n_qubo_variables <= largest_clique:
+                print('QUBO samplable via clique sampler (sampler=\'qa_clique\')')
+            else:
+                print('No clique embedding possible. Use sampler=\'qa\' or sampler=\'hybrid\'')
 
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
