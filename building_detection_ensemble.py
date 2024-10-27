@@ -172,23 +172,23 @@ def run_ensembles():
         qboost_params = dict(B=2, P=2, K=7)
     qboost_params |= qboost_common_params
 
-    # qboost = QBoost(**qboost_params)
-    # qboost.fit(train_x, train_y)
-    # with open(
-    #     ENSEMBLE_LOG_DIR
-    #     / f'qboost_{DATASET}_ts={n_train_samples}_vs=None_sampler={qboost_sampler}_htl={hybrid_time_limit}.pkl',
-    #     'wb',
-    # ) as f:
-    #     dill.dump(qboost, f)
+    qboost = QBoost(**qboost_params)
+    qboost.fit(train_x, train_y)
+    with open(
+        ENSEMBLE_LOG_DIR
+        / f'qboost_{DATASET}_ts={n_train_samples}_vs=None_sampler={qboost_sampler}_htl={hybrid_time_limit}.pkl',
+        'wb',
+    ) as f:
+        dill.dump(qboost, f)
 
-    # qboost_valid = QBoost(**qboost_params)
-    # qboost_valid.fit(train_x, train_y, valid_x[:n_train_samples], valid_y[:n_train_samples])
-    # with open(
-    #     ENSEMBLE_LOG_DIR
-    #     / f'qboost_{DATASET}_ts={n_train_samples}_vs={n_train_samples}_sampler={qboost_sampler}_htl={hybrid_time_limit}.pkl',
-    #     'wb',
-    # ) as f:
-    #     dill.dump(qboost_valid, f)
+    qboost_valid = QBoost(**qboost_params)
+    qboost_valid.fit(train_x, train_y, valid_x[:n_train_samples], valid_y[:n_train_samples])
+    with open(
+        ENSEMBLE_LOG_DIR
+        / f'qboost_{DATASET}_ts={n_train_samples}_vs={n_train_samples}_sampler={qboost_sampler}_htl={hybrid_time_limit}.pkl',
+        'wb',
+    ) as f:
+        dill.dump(qboost_valid, f)
 
     with open(
         ENSEMBLE_LOG_DIR
@@ -231,11 +231,11 @@ def run_ensembles():
         adabost_params = dict(n_estimators=30)
     adabost_params |= adaboost_common_params
 
-    # adaboost = AdaBoost(**adabost_params)
-    # adaboost.fit(train_x, train_y)
+    adaboost = AdaBoost(**adabost_params)
+    adaboost.fit(train_x, train_y)
 
-    # with open(ENSEMBLE_LOG_DIR / f'adaboost_{DATASET}_ts={n_train_samples}.pkl', 'wb') as f:
-    #     dill.dump(adaboost, f)
+    with open(ENSEMBLE_LOG_DIR / f'adaboost_{DATASET}_ts={n_train_samples}.pkl', 'wb') as f:
+        dill.dump(adaboost, f)
 
     with open(ENSEMBLE_LOG_DIR / f'adaboost_{DATASET}_ts={n_train_samples}.pkl', 'rb') as f:
         adaboost = dill.load(f)
