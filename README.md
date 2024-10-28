@@ -38,7 +38,7 @@ The experiments compare the performance of:
 - **Search algorithm**: Grid search was used on an extensive search space covering all hyperparameters for each model
 - **Weak learners**: QSVMs trained on small subsets of the training set were used as weak learners of ensemble algorithms
 - **Model training**: Each model was trained using 3-fold cross-validation on the training set
-- **Movel evaluation**: [Matthew's correlation coefficient](https://en.wikipedia.org/wiki/Phi_coefficient) used as an evaluation metric to accurately evaluate models in the presence of class imbalance
+- **Model evaluation**: [Matthew's correlation coefficient](https://en.wikipedia.org/wiki/Phi_coefficient) used as an evaluation metric to accurately evaluate models in the presence of class imbalance
 - **Results (MCC)**:
   - QSVM and QBoost generally outperfromed equivalent classical models (SVM and AdaBoost)
   - QBoost algorithm achieved best overall performance
@@ -48,13 +48,13 @@ The experiments compare the performance of:
 
 Models selected through hyperparameter optimization were trained on a 5,000-sample training set and evaluated on a 100,000-sample validation set.  All QUBO problems were solved using quantum annealing or a hybrid quantum-classical solver.
 - **Results**:
-  - SVM: 0.624 (Area 1); 0.744 (Area 2); 0.489 (Area 3)
-  - QSVM: 0.662 (Area 1); 0.741 (Area 2); 0.607 (Area 3)
-  - SVM with DRU Kernel: 0.620 (Area 1); 0.724 (Area 2); 0.435 (Area 3)
+  - SVM:                  0.624 (Area 1); 0.744 (Area 2); 0.489 (Area 3)
+  - QSVM:                 0.662 (Area 1); 0.741 (Area 2); 0.607 (Area 3)
+  - SVM with DRU Kernel:  0.620 (Area 1); 0.724 (Area 2); 0.435 (Area 3)
   - QSVM with DRU Kernel: 0.653 (Area 1); 0.701 (Area 2); 0.616 (Area 3)
-  - AdaBoost: 0.615 (Area 1); 0.686 (Area 2); 0.519 (Area 3)
-  - QBoost: 0.624 (Area 1); 0.695 (Area 2); 0.580 (Area 3)
-  - Softmax QSVM: 0.610 (Area 1); 0.611 (Area 2); 0.491 (Area 3)
+  - AdaBoost:             0.615 (Area 1); 0.686 (Area 2); 0.519 (Area 3)
+  - QBoost:               0.624 (Area 1); 0.695 (Area 2); 0.580 (Area 3)
+  - Softmax QSVM:         0.610 (Area 1); 0.611 (Area 2); 0.491 (Area 3)
 
 ## Key Findings
 
