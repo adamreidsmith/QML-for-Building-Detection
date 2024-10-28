@@ -6,7 +6,7 @@ This project explores the use of quantum machine learning techniques, specifical
 
 - **Study area**: Three 0.25 km² regions in Vancouver, B.C.
   - **Area 1**: Dense townhomes with scattered large vegetation in Kitsilano
-  - **Area 2**: Large commercial buidlings, roads, and minimal vegetation in downtown Vancouver
+  - **Area 2**: Large commercial buildings, roads, and minimal vegetation in downtown Vancouver
   - **Area 3**: Large, sparsely distributed homes surrounded by forest in Point Grey
 - **Source**: Vancouver Open Data Portal [[Vancouver LiDAR 2022](https://opendata.vancouver.ca/explore/dataset/lidar-2022/information/)]
 - **Mean point density**: 49 points/m²
@@ -17,9 +17,9 @@ This project explores the use of quantum machine learning techniques, specifical
 
 Four features were extracted for classification:
 1. **Normalized height**: The height of each point above ground, using a cloth simulation filter to generate a DEM.
-2. **Height variation**: The [median absolute deviation](https://en.wikipedia.org/wiki/Median_absolute_deviation) of the normalized hieght values within a disk of radius $r = 0.5m$.
+2. **Height variation**: The [median absolute deviation](https://en.wikipedia.org/wiki/Median_absolute_deviation) of the normalized height values within a disk of radius $r = 0.5m$.
 3. **Normal variation**: The negative of the average dot product of each normal with other normals within a disk of radius $r = 0.5m$, where normal vectors are computed using standard PCA methods. This value gives a measure of planarity near each point. 
-4. **Log-intensity**: The logarithm of the amplitude of the response reflected back to the laser scanner.  This can provide information of about the properties of the reflected surface.
+4. **Log-intensity**: The logarithm of the amplitude of the response reflected back to the laser scanner.  This can provide information about the properties of the reflected surface.
 
 ## Experiments
 
@@ -30,7 +30,7 @@ The experiments compare the performance of:
 3. SVMs and QSVMs with various quantum kernels
 4. AdaBoost ensemble learning using QSVM as a weak learner
 5. QBoost ensemble learning using QSVM as a weak learner
-6. Ensemble weighted by the softmax of the Matthew's correlation coefficent for each weak learner (softmax QSVM)
+6. Ensemble weighted by the softmax of the Matthew's correlation coefficient for each weak learner (softmax QSVM)
 
 ### Hyperparameter Optimization
 
@@ -40,7 +40,7 @@ The experiments compare the performance of:
 - **Model training**: Each model was trained using 3-fold cross-validation on the training set
 - **Model evaluation**: [Matthew's correlation coefficient](https://en.wikipedia.org/wiki/Phi_coefficient) used as an evaluation metric to accurately evaluate models in the presence of class imbalance
 - **Results (MCC)**:
-  - QSVM and QBoost generally outperfromed equivalent classical models (SVM and AdaBoost)
+  - QSVM and QBoost generally outperformed equivalent classical models (SVM and AdaBoost)
   - QBoost algorithm achieved best overall performance
   - Classical Gaussian RBF kernel outperformed all quantum kernels, but data re-uploading (DRU) kernel was a close second
 
@@ -49,15 +49,15 @@ The experiments compare the performance of:
 Models selected through hyperparameter optimization were trained on a 5,000-sample training set and evaluated on a 100,000-sample validation set.  All QUBO problems were solved using quantum annealing or a hybrid quantum-classical solver.
 - **Results**:
 
-| Model                | Area 1 | Area 2 | Area 3 |
-| :------------------- | :----: | :----: | :----: |
-| SVM                  | 0.624  | **0.744**  | 0.489  |
-| QSVM                 | **0.662**  | 0.741  | 0.607  |
-| SVM with DRU Kernel  | 0.620  | 0.724  | 0.435  |
-| QSVM with DRU Kernel | 0.653  | 0.701  | **0.616**  |
-| AdaBoost             | 0.615  | 0.686  | 0.519  |
-| QBoost               | 0.624  | 0.695  | 0.580  |
-| Softmax QSVM         | 0.610  | 0.611  | 0.491  |
+| Model                | Area 1     | Area 2     | Area 3     |
+| :------------------- | :--------: | :--------: | :--------: |
+| SVM                  | 0.624      | **0.744**  | 0.489      |
+| QSVM                 | **0.662**  | 0.741      | 0.607      |
+| SVM with DRU Kernel  | 0.620      | 0.724      | 0.435      |
+| QSVM with DRU Kernel | 0.653      | 0.701      | **0.616**  |
+| AdaBoost             | 0.615      | 0.686      | 0.519      |
+| QBoost               | 0.624      | 0.695      | 0.580      |
+| Softmax QSVM         | 0.610      | 0.611      | 0.491      |
 
 ## Key Findings
 
@@ -87,7 +87,7 @@ Potential future directions for this project include:
 - D. Willsch, M. Willsch, H. De Raedt, and K. Michielsen. Support vector machines on the d-wave quantum annealer. _Computer Physics Communications_, 248:107006, 2020.
 - Gabriele Cavallaro, Dennis Willsch, Madita Willsch, Kristel Michielsen, and Morris Riedel. Approaching remote sensing image classification with ensembles of support vector machines on the d-wave quantum annealer. In _IGARSS 2020 - 2020 IEEE International Geoscience and Remote Sensing Symposium_, pages 1973–1976, 2020.
 - Yoav Freund and Robert E Schapire. A decision-theoretic generalization of on-line learning and an application to boosting. _Journal of Computer and System Sciences_, 55(1):119–139, 1997.
-- Hartmut Neven, Vasil S. Denchev, Geordie Rose, and William G. Macready. Qboost: Large scale classifier training withadiabatic quantum optimization. In Steven C. H. Hoi and Wray Buntine, editors, _Proceedings of the Asian Conference on Machine Learning_, volume 25 of _Proceedings of Machine Learning Research_, pages 333–348, Singapore Management University, Singapore, 04–06 Nov 2012. PMLR.
+- Hartmut Neven, Vasil S. Denchev, Geordie Rose, and William G. Macready. Qboost: Large scale classifier training with adiabatic quantum optimization. In Steven C. H. Hoi and Wray Buntine, editors, _Proceedings of the Asian Conference on Machine Learning_, volume 25 of _Proceedings of Machine Learning Research_, pages 333–348, Singapore Management University, Singapore, 04–06 Nov 2012. PMLR.
 - Hartmut Neven, Vasil S. Denchev, Geordie Rose, and William G. Macready. Training a binary classifier with the quantum adiabatic algorithm, 2008.
 - Vojtech Havlıcek, Antonio D. Corcoles, Kristan Temme, Aram W. Harrow, Abhinav Kandala, Jerry M. Chow, and Jay M. Gambetta. Supervised learning with quantum-enhanced feature spaces. _Nature_, 567(7747):209–212, Mar 2019.
 - Shu Su, Kazuya Nakano, and Kazune Wakabayashi. Building detection from aerial lidar point cloud using deep learning. _The International Archives of the Photogrammetry, Remote Sensing and Spatial Information Sciences_, XLIII-B2-2022:291–296, 2022.
