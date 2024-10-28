@@ -1,70 +1,83 @@
 # Quantum Machine Learning for Building Detection in LiDAR Point Clouds
 
-This repository contains the code for experiments comparing classical and quantum machine learning algorithms for building detection in LiDAR point cloud data.
-
-## Overview
-
-We explore the application of quantum machine learning techniques to the task of building detection in urban environments using LiDAR point cloud data. The experiments compare the performance of:
-
-1. Classical Support Vector Machines (SVM)
-2. Quantum Support Vector Machines (QSVM)
-3. AdaBoost ensemble learning
-4. QBoost ensemble learning
-5. SVMs adn QSVMs with various quantum kernels
+This project explores the use of quantum machine learning techniques, specifically Quantum Support Vector Machines (QSVMs) and Quantum Boosting (QBoost), for the task of building detection from 3D LiDAR point cloud data. The goal is to compare the performance of these quantum models against their classical counterparts, such as Support Vector Machines (SVMs) and AdaBoost, on this spatial classification problem.
 
 ## Data
 
-- **Study area**: 1 km² residential region in Kitsilano, Vancouver, B.C.
+- **Study area**: Three 0.25 km² regions in Vancouver, B.C.
+  - **Area 1**: Dense townhomes with scattered large vegetation in Kitsilano
+  - **Area 2**: Large commercial buidlings, roads, and minimal vegetation in downtown Vancouver
+  - **Area 3**: Large, sparsely distributed homes surrounded by forest in Point Grey
 - **Source**: Vancouver Open Data Portal [[Vancouver LiDAR 2022](https://opendata.vancouver.ca/explore/dataset/lidar-2022/information/)]
-- **Mean point density**: 46 points/m²
+- **Mean point density**: 49 points/m²
 - **Pre-classification**: 8 classes (unclassified, ground, low vegetation, high vegetation, water, buildings, other, noise)
-- **Preprocessing**: Noise points discarded; unclassified points assigned to most common class among 20 nearest neighbors
+- **Preprocessing**: Noise and unclassified points discarded
 
 ### Feature Extraction
 
 Four features were extracted for classification:
 1. **Normalized height**: The height of each point above ground, using a cloth simulation filter to generate a DEM.
-2. **Height variation**: The absolute difference between minimum and maximum values of normalized height within a disk of radius $r = 0.5m$.
-3. **Normal variation**: The negative of the average dot product of each normal with other normals within a disk of radius $r = 1m$, where normal vectors are computed using standard PCA methods. This value gives a measure of planarity near each point. 
-4. **Return intensity**: The amplitude of the response reflected back to the laser scanner.  This can provide information of about the properties of the reflected surface.
+2. **Height variation**: The [median absolute deviation](https://en.wikipedia.org/wiki/Median_absolute_deviation) of the normalized hieght values within a disk of radius $r = 0.5m$.
+3. **Normal variation**: The negative of the average dot product of each normal with other normals within a disk of radius $r = 0.5m$, where normal vectors are computed using standard PCA methods. This value gives a measure of planarity near each point. 
+4. **Log-intensity**: The logarithm of the amplitude of the response reflected back to the laser scanner.  This can provide information of about the properties of the reflected surface.
 
-## Experiments and Results
+## Experiments
 
-### 1. SVM vs. QSVM
+The experiments compare the performance of:
 
-- **Training set**: 100 random points
-- **Validation set**: 100 random points disjoint from the training set
-- **Kernel**: Radial Basis Function (RBF)
+1. Classical Support Vector Machines (SVM)
+2. Support Vector Machines trained on Quantum Annealers (QSVM)
+3. SVMs and QSVMs with various quantum kernels
+4. AdaBoost ensemble learning using QSVM as a weak learner
+5. QBoost ensemble learning using QSVM as a weak learner
+6. Ensemble weighted by the softmax of the Matthew's correlation coefficent for each weak learner (softmax QSVM)
+
+### Hyperparameter Optimization
+
+- **Data**: 1,000-sample training set and a 100,000-sample validation set sampled uniformly at random for each area
+- **Search algorithm**: Grid search was used on an extensive search space covering all hyperparameters for each model
+- **Weak learners**: QSVMs trained on small subsets of the training set were used as weak learners of ensemble algorithms
+- **Model training**: Each model was trained using 3-fold cross-validation on the training set
+- **Movel evaluation**: [Matthew's correlation coefficient](https://en.wikipedia.org/wiki/Phi_coefficient) used as an evaluation metric to accurately evaluate models in the presence of class imbalance
+- **Results (MCC)**:
+  - QSVM and QBoost generally outperfromed equivalent classical models (SVM and AdaBoost)
+  - QBoost algorithm achieved best overall performance
+  - Classical Gaussian RBF kernel outperformed all quantum kernels, but data re-uploading (DRU) kernel was a close second
+
+### Evaluation of Optimal Models
+
+Models selected through hyperparameter optimization were trained on a 5,000-sample training set and evaluated on a 100,000-sample validation set.  All QUBO problems were solved using quantum annealing or a hybrid quantum-classical solver.
 - **Results**:
-  - Classical SVM: 92% (validation), 87.36% (full dataset)
-  - Quantum SVM: 92% (validation), 87.66% (full dataset)
+  - SVM: 0.624 (Area 1); 0.744 (Area 2); 0.489 (Area 3)
+  - QSVM: 0.662 (Area 1); 0.741 (Area 2); 0.607 (Area 3)
+  - SVM with DRU Kernel: 0.620 (Area 1); 0.724 (Area 2); 0.435 (Area 3)
+  - QSVM with DRU Kernel: 0.653 (Area 1); 0.701 (Area 2); 0.616 (Area 3)
+  - AdaBoost: 0.615 (Area 1); 0.686 (Area 2); 0.519 (Area 3)
+  - QBoost: 0.624 (Area 1); 0.695 (Area 2); 0.580 (Area 3)
+  - Softmax QSVM: 0.610 (Area 1); 0.611 (Area 2); 0.491 (Area 3)
 
-### 2. AdaBoost vs. QBoost
+## Key Findings
 
-- **Training set**: 1000 random points
-- **Validation set**: 100 random points disjoint from the training set
-- **Weak classifiers**: 50 QSVMs trained on random 20-point subsets of the training set
-- **Results**:
-  - AdaBoost: 90% (validation), 88.33% (full dataset)
-  - QBoost: 90% (validation), 90.14% (full dataset)
+The main findings of this project include:
 
-### 3. Quantum Kernel Methods
-
-Tested 5 quantum kernels with various configurations:
-1. Pauli
-2. IQP (Instantaneous Quantum Polynomial)
-3. Data re-uploading
-4. QAOA-inspired
-5. Polynomial
-
-**Best performing quantum kernel**:
-- Data re-uploading with 'full' entanglement
-- Classical SVM: 89.7% (validation), 87.87% (full dataset)
-- Quantum SVM: 92.3% (validation), 88.98% (full dataset)
+1. The QSVM model outperformed the classical SVM in areas with high class imbalance, suggesting that quantum models may be more effective at handling imbalanced data.
+2. The QBoost ensemble model achieved the best overall performance on the 1000-sample training set, demonstrating the potential of quantum boosting techniques for spatial classification tasks.
+3. The quantum DRU kernel performed comparably to the classical Gaussian RBF kernel, indicating that quantum kernels can be a viable alternative in some applications.
+4. Careful hyperparameter tuning was crucial for optimizing the performance of both the quantum and classical models.
 
 ## Conclusion
 
-Quantum machine learning techniques show promising results for building detection in LiDAR point cloud data, with performance comparable to or exceeding classical methods in some cases. The data re-uploading quantum kernel with full entanglement pattern demonstrated superior performance among the tested quantum kernels, slightly outperforming the classical RBF kernel.
+Quantum machine learning techniques show promising results for spatial data analysis, with performance comparable to or exceeding equivalent classical methods in some cases. The data re-uploading quantum kernel with full entanglement pattern demonstrated superior performance among the tested quantum kernels, slightly outperforming the classical RBF kernel.
+
+## Future Work
+
+Potential future directions for this project include:
+
+1. Development of more sophisticated quantum kernels optimized for spatial data.
+2. Application of the QSVM architecture to multi-class classification of LiDAR point clouds.
+3. Investigation of additional LiDAR features (e.g. return number, point density, eigenvalue-derived features) to enhance classification performance.
+4. Exploration of methods for reducing QUBO complexity while retaining solution quality.
+5. Analysis of quantum model scaling behaviour with larger datasets, more diverse geographic areas, and improved quantum hardware.
 
 ## References
 
