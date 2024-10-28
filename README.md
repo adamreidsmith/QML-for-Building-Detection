@@ -48,6 +48,7 @@ The experiments compare the performance of:
 
 Models selected through hyperparameter optimization were trained on a 5,000-sample training set and evaluated on a 100,000-sample validation set.  All QUBO problems were solved using quantum annealing or a hybrid quantum-classical solver.
 - **Results**:
+
 | Model                | Area 1 | Area 2 | Area 3 |
 | :------------------- | :----: | :----: | :----: |
 | SVM                  | 0.624  | 0.744  | 0.489  |
