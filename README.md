@@ -51,10 +51,10 @@ Models selected through hyperparameter optimization were trained on a 5,000-samp
 
 | Model                | Area 1 | Area 2 | Area 3 |
 | :------------------- | :----: | :----: | :----: |
-| SVM                  | 0.624  | 0.744  | 0.489  |
-| QSVM                 | 0.662  | 0.741  | 0.607  |
+| SVM                  | 0.624  | **0.744**  | 0.489  |
+| QSVM                 | **0.662**  | 0.741  | 0.607  |
 | SVM with DRU Kernel  | 0.620  | 0.724  | 0.435  |
-| QSVM with DRU Kernel | 0.653  | 0.701  | 0.616  |
+| QSVM with DRU Kernel | 0.653  | 0.701  | **0.616**  |
 | AdaBoost             | 0.615  | 0.686  | 0.519  |
 | QBoost               | 0.624  | 0.695  | 0.580  |
 | Softmax QSVM         | 0.610  | 0.611  | 0.491  |
