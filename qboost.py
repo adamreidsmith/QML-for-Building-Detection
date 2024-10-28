@@ -19,7 +19,7 @@ class QBoost:
     References
     ----------
     [1] Hartmut Neven, Vasil S. Denchev, Geordie Rose, and William G. Macready. Qboost: Large scale
-        classifier training withadiabatic quantum optimization. In Steven C. H. Hoi and Wray Buntine,
+        classifier training with adiabatic quantum optimization. In Steven C. H. Hoi and Wray Buntine,
         editors, Proceedings of the Asian Conference on Machine Learning, volume 25 of Proceedings of
         Machine Learning Research, pages 333-348, Singapore Management University, Singapore,
         04-06 Nov 2012. PMLR. https://proceedings.mlr.press/v25/neven12.html.
